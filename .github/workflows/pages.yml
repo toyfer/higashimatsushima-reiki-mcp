@@ -54,7 +54,25 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Collect ordinance index
-        run: python scripts/daily_check.py --mode collect --delay 0.1
+        run: python scripts/daily_check.py --mode collect --delay 0.35
+
+      - name: Guard against sample downgrade of a full deployment
+        id: guard
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          published_count=$(curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('law_count', 0))" 2>/dev/null || echo 0)
+          echo "Published law_count: $published_count"
+          if [ "${published_count:-0}" -gt 5 ] 2>/dev/null; then
+            echo "skip_sample=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Published API already has $published_count laws. Skipping sample deploy to avoid downgrading it to 5 laws. Run this workflow manually with full_build=true to refresh the full API."
+          else
+            echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build full static API
         if: github.event_name == 'workflow_dispatch' && inputs.full_build == true
@@ -63,17 +81,26 @@ jobs:
         run: python scripts/build_static_api.py --delay "$BUILD_DELAY" --fail-on-error
 
       - name: Build sample static API
-        if: github.event_name != 'workflow_dispatch' || inputs.full_build != true
-        run: python scripts/build_static_api.py --limit 5 --delay 0.1
+        if: steps.guard.outputs.skip_sample != 'true' && (github.event_name != 'workflow_dispatch' || inputs.full_build != true)
+        env:
+          BUILD_DELAY: ${{ inputs.delay_seconds || '0.35' }}
+        run: python scripts/build_static_api.py --limit 5 --delay "$BUILD_DELAY"
+
+      - name: Skip deployment notice
+        if: steps.guard.outputs.skip_sample == 'true'
+        run: echo "Sample build and deployment were skipped because a larger full API is already published."
 
       - name: Set up GitHub Pages
+        if: steps.guard.outputs.skip_sample != 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload site artifact
+        if: steps.guard.outputs.skip_sample != 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
       - name: Deploy to GitHub Pages
+        if: steps.guard.outputs.skip_sample != 'true'
         id: deployment
         uses: actions/deploy-pages@v4
