@@ -1,0 +1,23 @@
+{
+  "checked_at_utc": "2026-11-05T13:36:52.716057+00:00",
+  "menu_url": "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html",
+  "menu_sha256": "4de0f77dbf1d5ec14c4b1439620bff871600c411a08a3dd2ea8f9bb34a98351c",
+  "previous_menu_sha256": "",
+  "current_date": "令和8年6月26日",
+  "previous_current_date": "",
+  "changed": true,
+  "mode": "collect",
+  "law_count": 1192,
+  "laws": [
+    {
+      "id": "r122RG00000001",
+      "title": "東松島市役所の位置を定める条例",
+      "url": "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_honbun/r122RG00000001.html",
+      "source_page": "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_taikei/r_taikei_01_01.html"
+    }
+  ],
+  "visited_page_count": 74,
+  "visited_pages": [],
+  "pending_page_count": 0,
+  "crawl_complete": true
+}
