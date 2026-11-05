@@ -1,0 +1,79 @@
+name: Deploy static ordinance API to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'scripts/build_static_api.py'
+      - 'scripts/parse_honbun.py'
+      - 'scripts/reiki_common.py'
+      - 'scripts/daily_check.py'
+      - 'data/status/latest.json'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+    inputs:
+      full_build:
+        description: 'Build every ordinance body into site/api before deploying'
+        required: true
+        default: false
+        type: boolean
+      delay_seconds:
+        description: 'Delay between ordinance page fetches'
+        required: true
+        default: '0.35'
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test builders
+        run: python -m unittest discover -s tests -v
+
+      - name: Collect ordinance index
+        run: python scripts/daily_check.py --mode collect --delay 0.1
+
+      - name: Build full static API
+        if: github.event_name == 'workflow_dispatch' && inputs.full_build == true
+        env:
+          BUILD_DELAY: ${{ inputs.delay_seconds }}
+        run: python scripts/build_static_api.py --delay "$BUILD_DELAY" --fail-on-error
+
+      - name: Build sample static API
+        if: github.event_name != 'workflow_dispatch' || inputs.full_build != true
+        run: python scripts/build_static_api.py --limit 5 --delay 0.1
+
+      - name: Set up GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
