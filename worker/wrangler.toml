@@ -1,0 +1,6 @@
+name = "higashimatsushima-reiki-mcp"
+main = "src/index.js"
+compatibility_date = "2024-11-05"
+
+[vars]
+PAGES_BASE = "https://toyfer.github.io/higashimatsushima-reiki-mcp"
