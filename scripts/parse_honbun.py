@@ -19,11 +19,11 @@ DATENUMBER_RE = re.compile(r'<p class="datenumber-area[^"]*">(.*?)</p>', re.S)
 TAIKEI_RE = re.compile(r'<span class="taikei-item">(.*?)</span>\s*</div>', re.S)
 ENKAKU_ROW_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
-HEADING_LINE_RE = re.compile(r"^[\(\（].+[\)\）]$")
+HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
 APPENDIX_TABLE_RE = re.compile(r"^別表")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
-ITEM_RE = re.compile(r"^[\(\（]([0-9０-９]+)[\)\）]\s*(.*)$")
+ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
 DATE_NUMBER_SPLIT_RE = re.compile(r"^(.*?)\s+(.+)$")
 
@@ -36,7 +36,7 @@ def to_int(value: str) -> int:
 
 def clean_title(value: str) -> str:
     value = re.sub(r"<[^>]+>", "", value)
-    value = value.replace("\xa0", " ").replace("　", " ")
+    value = value.replace("\xa0", " ").replace("\u3000", " ")
     return re.sub(r"\s+", " ", value).strip().lstrip("○").strip()
 
 
@@ -156,6 +156,8 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             continue
 
         if APPENDIX_TABLE_RE.match(line):
+            # Inline references such as 行政職給料表(別表第1) remain article text.
+            # Treat only a line that starts with 別表第... as an appendix heading.
             if re.match(r"^別表第[0-9０-９一二三四五六七八九十]+", line):
                 flush_article()
                 mode = "appendix"

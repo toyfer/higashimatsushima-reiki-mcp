@@ -25,6 +25,7 @@ class DailyCheckTest(unittest.TestCase):
         self.assertEqual(laws[0]["title"], "東松島市の休日を定める条例")
         self.assertTrue(laws[0]["url"].endswith("/reiki_honbun/r122RG00000002.html"))
 
+
     def test_collect_from_taikei_reports_truncation(self) -> None:
         pages = {
             daily_check.TAIKEI_URL: '<a href="r_taikei_01.html">next</a><a href="../reiki_honbun/r122RG00000002.html">law</a>',
