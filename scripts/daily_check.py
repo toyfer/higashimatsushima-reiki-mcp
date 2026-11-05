@@ -89,8 +89,14 @@ def collect_from_taikei(max_pages: int, delay_seconds: float) -> dict[str, objec
     visited: set[str] = set()
     laws: dict[str, dict[str, str]] = {}
     page_errors: list[dict[str, str]] = []
+    truncated = False
 
-    while queue and len(visited) < max_pages:
+    if max_pages <= 0:
+        truncated = True
+    while queue and not truncated:
+        if len(visited) >= max_pages:
+            truncated = True
+            break
         page_url = queue.pop(0)
         if page_url in visited:
             continue
@@ -116,9 +122,15 @@ def collect_from_taikei(max_pages: int, delay_seconds: float) -> dict[str, objec
         if delay_seconds > 0:
             time.sleep(delay_seconds)
 
+    pending_urls = sorted(set(queue) - visited)
+    truncated = truncated or bool(pending_urls)
     return {
         "visited_pages": sorted(visited),
         "visited_page_count": len(visited),
+        "pending_page_count": len(pending_urls),
+        "pending_pages": pending_urls[:20],
+        "crawl_complete": not truncated and not page_errors and not pending_urls,
+        "truncated": truncated,
         "laws": [laws[key] for key in sorted(laws)],
         "law_count": len(laws),
         "page_errors": page_errors,
@@ -181,6 +193,8 @@ def main() -> int:
         "law_count": previous_law_count,
         "laws": previous.get("laws", []),
         "visited_page_count": previous.get("visited_page_count", 0),
+        "pending_page_count": previous.get("pending_page_count", 0),
+        "crawl_complete": previous.get("crawl_complete", False),
         "page_errors": [],
     }
 
@@ -193,9 +207,22 @@ def main() -> int:
                 "laws": collection["laws"],
                 "visited_page_count": collection["visited_page_count"],
                 "visited_pages": collection["visited_pages"],
+                "pending_page_count": collection["pending_page_count"],
+                "crawl_complete": collection["crawl_complete"],
                 "page_errors": collection["page_errors"],
             }
         )
+        if collection["truncated"]:
+            print(
+                f"ERROR: crawl truncated at max_pages={args.max_pages}; "
+                f"visited={collection['visited_page_count']}; pending={collection['pending_page_count']}",
+                file=sys.stderr,
+            )
+            set_github_output("status", "truncated")
+            set_github_output("changed", str(changed).lower())
+            set_github_output("current_date", current_date)
+            set_github_output("law_count", str(collection["law_count"]))
+            return 6
         if collection["page_errors"]:
             print(f"ERROR: {len(collection['page_errors'])} page(s) failed", file=sys.stderr)
             set_github_output("status", "collect_failed")
@@ -228,6 +255,8 @@ def main() -> int:
         f"- Mode: `{args.mode}`",
         f"- Ordinances indexed: `{result.get('law_count')}`",
         f"- Visited index pages: `{result.get('visited_page_count')}`",
+        f"- Pending index pages: `{result.get('pending_page_count', 0)}`",
+        f"- Crawl complete: `{str(bool(result.get('crawl_complete'))).lower()}`",
     ]
     if collection is not None:
         summary_lines.append("- Index pages were crawled in this run.")
