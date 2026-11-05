@@ -1,0 +1,146 @@
+name: Daily Higashimatsushima ordinance check
+
+on:
+  schedule:
+    # 03:17 JST = 18:17 UTC on the previous day. A non-round minute reduces schedule congestion.
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check only detects the menu date/hash; collect also crawls index pages'
+        required: true
+        default: check
+        type: choice
+        options:
+          - check
+          - collect
+      force_collect:
+        description: 'Crawl index pages even when the menu page is unchanged'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: higashimatsushima-reiki-daily-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check ordinance pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test checker
+        run: python -m unittest discover -s tests -v
+
+      - name: Run daily check
+        id: check
+        env:
+          RUN_MODE: ${{ inputs.mode || 'check' }}
+          FORCE_COLLECT: ${{ inputs.force_collect || false }}
+        run: |
+          args=(--mode "$RUN_MODE")
+          if [ "$FORCE_COLLECT" = "true" ]; then
+            args+=(--force-collect)
+          fi
+          python scripts/daily_check.py "${args[@]}"
+
+      - name: Upload status artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reiki-status-${{ github.run_id }}
+          path: |
+            data/status/latest.json
+            data/status/latest-summary.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Commit updated status
+        if: success()
+        env:
+          CHANGED: ${{ steps.check.outputs.changed }}
+        run: |
+          if git diff --quiet -- data/status/latest.json data/status/latest-summary.md; then
+            echo "No status file changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/status/latest.json data/status/latest-summary.md
+          git commit -m "chore: update ordinance check status"
+          git push
+
+      - name: Open issue when the site changed
+        if: success() && steps.check.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          CURRENT_DATE: ${{ steps.check.outputs.current_date }}
+          LAW_COUNT: ${{ steps.check.outputs.law_count }}
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.existsSync('data/status/latest-summary.md')
+              ? fs.readFileSync('data/status/latest-summary.md', 'utf8')
+              : 'No summary file was generated.';
+            const titleDate = process.env.CURRENT_DATE || new Date().toISOString().slice(0, 10);
+            const payload = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Ordinance index changed: ${titleDate}`,
+              body: `${summary}\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            };
+            try {
+              await github.rest.issues.create({ ...payload, labels: ['reiki-update'] });
+            } catch (error) {
+              core.warning(`Issue creation with label failed: ${error.message}`);
+              await github.rest.issues.create(payload);
+            }
+
+      - name: Open or update failure issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Daily ordinance check failed';
+            const body = `The daily check failed.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'reiki-check-failure',
+              per_page: 10
+            });
+            if (issues.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body
+              });
+            } else {
+              const payload = {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body
+              };
+              try {
+                await github.rest.issues.create({ ...payload, labels: ['reiki-check-failure'] });
+              } catch (error) {
+                core.warning(`Failure issue creation with label failed: ${error.message}`);
+                await github.rest.issues.create(payload);
+              }
+            }
