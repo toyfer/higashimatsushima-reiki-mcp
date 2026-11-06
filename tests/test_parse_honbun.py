@@ -69,6 +69,9 @@ PAREN_ITEM = """
 
 PAREN_ITEM_FULLWIDTH = PAREN_ITEM.replace("(市の休日)", "（市の休日）").replace("(3)", "（3）").replace("(前号に掲げる日を除く。)", "（前号に掲げる日を除く。）").replace("(期限の特例)", "（期限の特例）")
 
+NESTED_HEADING = PAREN_ITEM.replace("(期限の特例)", "(職員（非常勤）の勤務)")
+NESTED_HEADING_MIXED = PAREN_ITEM.replace("(期限の特例)", "（職員(非常勤)の勤務）")
+
 
 class ParseHonbunTest(unittest.TestCase):
     def test_numbered_ordinance(self) -> None:
@@ -101,6 +104,16 @@ class ParseHonbunTest(unittest.TestCase):
         items = article["paragraphs"][0]["items"]
         self.assertEqual([item["label"] for item in items], ["(1)", "(2)", "(3)"])
         self.assertTrue(items[2]["text"].endswith("（前号に掲げる日を除く。）"))
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_nested_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(NESTED_HEADING, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        self.assertEqual(data["articles"][1]["heading"], "(職員（非常勤）の勤務)")
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_mixed_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(NESTED_HEADING_MIXED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        self.assertEqual(data["articles"][1]["heading"], "（職員(非常勤)の勤務）")
         self.assertEqual(data["parse_warnings"], [])
 
     def test_unnumbered_ordinance(self) -> None:
