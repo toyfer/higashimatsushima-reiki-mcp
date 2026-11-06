@@ -19,11 +19,11 @@ DATENUMBER_RE = re.compile(r'<p class="datenumber-area[^"]*">(.*?)</p>', re.S)
 TAIKEI_RE = re.compile(r'<span class="taikei-item">(.*?)</span>\s*</div>', re.S)
 ENKAKU_ROW_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
-HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
+HEADING_LINE_RE = re.compile(r"^[\(\（][^\(\（\)）]+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
 APPENDIX_TABLE_RE = re.compile(r"^別表")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
-ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
+ITEM_RE = re.compile(r"^[\(\（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
 DATE_NUMBER_SPLIT_RE = re.compile(r"^(.*?)\s+(.+)$")
 
@@ -36,7 +36,7 @@ def to_int(value: str) -> int:
 
 def clean_title(value: str) -> str:
     value = re.sub(r"<[^>]+>", "", value)
-    value = value.replace("\xa0", " ").replace("\u3000", " ")
+    value = value.replace("\xa0", " ").replace("　", " ")
     return re.sub(r"\s+", " ", value).strip().lstrip("○").strip()
 
 
@@ -113,7 +113,12 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         if ordinance_number and line == ordinance_number and mode == "preamble":
             continue
 
-        if HEADING_LINE_RE.match(line) and mode in {"preamble", "article"} and not APPENDIX_TABLE_RE.match(line):
+        if (
+            HEADING_LINE_RE.match(line)
+            and not ITEM_RE.match(line)
+            and mode in {"preamble", "article"}
+            and not APPENDIX_TABLE_RE.match(line)
+        ):
             pending_heading = line
             if current_article is not None:
                 current_article["_lines"].append(line)
@@ -197,6 +202,20 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
 
     body_text = "\n".join(preamble)
     plain_text = "\n".join(lines)
+    parse_warnings: list[str] = []
+    if not articles and not body_text:
+        parse_warnings.append("no_articles_parsed")
+    for parsed_article in articles:
+        item_lines = [
+            article_line
+            for article_line in parsed_article["text"].splitlines()
+            if ITEM_RE.match(article_line.strip())
+        ]
+        structured_items = sum(len(paragraph.get("items", [])) for paragraph in parsed_article["paragraphs"])
+        if len(item_lines) != structured_items:
+            parse_warnings.append(
+                f"item_structure_mismatch:{parsed_article['label']}:text={len(item_lines)}:structured={structured_items}"
+            )
     return {
         "id": law_id,
         "title": title or index_title,
@@ -215,7 +234,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "history": parse_history(html),
         "plain_text": plain_text,
         "text_sha256": hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),
-        "parse_warnings": ([] if articles or body_text else ["no_articles_parsed"]),
+        "parse_warnings": parse_warnings,
     }
 
 
