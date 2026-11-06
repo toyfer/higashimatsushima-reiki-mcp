@@ -3,6 +3,21 @@ const SAFE_ID_RE = /^r\d+RG\d+$/i;
 const CACHE_TTL_SECONDS = 300;
 const PROTOCOL_VERSION = "2024-11-05";
 
+class ProtocolError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "ProtocolError";
+    this.code = code;
+  }
+}
+
+class ToolExecutionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ToolExecutionError";
+  }
+}
+
 function jsonResponse(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -20,6 +35,10 @@ function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
 
+function errorTextResult(text) {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
 function pagesBase(env) {
   const raw = (env && env.PAGES_BASE) || DEFAULT_PAGES_BASE;
   return String(raw).replace(/\/+$/, "");
@@ -27,14 +46,23 @@ function pagesBase(env) {
 
 async function fetchPagesJson(env, path) {
   const url = `${pagesBase(env)}${path}`;
-  const response = await fetch(url, {
-    headers: { "User-Agent": "higashimatsushima-reiki-mcp-worker/0.1" },
-    cf: { cacheTtl: CACHE_TTL_SECONDS, cacheEverything: true },
-  });
-  if (!response.ok) {
-    throw new Error(`Pages fetch failed: ${response.status} ${url}`);
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { "User-Agent": "higashimatsushima-reiki-mcp-worker/0.1" },
+      cf: { cacheTtl: CACHE_TTL_SECONDS, cacheEverything: true },
+    });
+  } catch (error) {
+    throw new ToolExecutionError(`Pages fetch failed: ${error instanceof Error ? error.message : String(error)} ${url}`);
   }
-  return response.json();
+  if (!response.ok) {
+    throw new ToolExecutionError(`Pages fetch failed: ${response.status} ${url}`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new ToolExecutionError(`Pages fetch failed: invalid JSON ${url}`);
+  }
 }
 
 function normalize(value) {
@@ -55,8 +83,12 @@ function scoreLaw(law, query) {
   return 0;
 }
 
+function invalidParams(message) {
+  return new ProtocolError(-32602, message);
+}
+
 async function callTool(env, name, args) {
-  const input = args && typeof args === "object" ? args : {};
+  const input = args && typeof args === "object" && !Array.isArray(args) ? args : {};
   if (name === "reiki_status") {
     const [meta, health] = await Promise.all([
       fetchPagesJson(env, "/api/meta.json"),
@@ -66,7 +98,7 @@ async function callTool(env, name, args) {
   }
   if (name === "search_laws_by_title") {
     const query = String(input.query || "").trim();
-    if (!query) throw new Error("query is required");
+    if (!query) throw invalidParams("query is required");
     const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
     const index = await fetchPagesJson(env, "/api/laws/index.json");
     const laws = Array.isArray(index.laws) ? index.laws : [];
@@ -80,15 +112,15 @@ async function callTool(env, name, args) {
   }
   if (name === "get_law") {
     const lawId = String(input.law_id || "").trim();
-    if (!SAFE_ID_RE.test(lawId)) throw new Error("law_id must match ^r\\d+RG\\d+$");
+    if (!SAFE_ID_RE.test(lawId)) throw invalidParams("law_id must match ^r\\d+RG\\d+$");
     const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`);
     return textResult(JSON.stringify(law, null, 2));
   }
   if (name === "get_article") {
     const lawId = String(input.law_id || "").trim();
     const label = String(input.article_label || "").trim();
-    if (!SAFE_ID_RE.test(lawId)) throw new Error("law_id must match ^r\\d+RG\\d+$");
-    if (!label) throw new Error("article_label is required");
+    if (!SAFE_ID_RE.test(lawId)) throw invalidParams("law_id must match ^r\\d+RG\\d+$");
+    if (!label) throw invalidParams("article_label is required");
     const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`);
     const articles = Array.isArray(law.articles) ? law.articles : [];
     const found = articles.filter((article) => article.label === label);
@@ -98,7 +130,7 @@ async function callTool(env, name, args) {
     }
     return textResult(JSON.stringify({ law_id: lawId, title: law.title, articles: found }, null, 2));
   }
-  throw new Error(`Unknown tool: ${name}`);
+  throw invalidParams(`Unknown tool: ${name}`);
 }
 
 const TOOLS = [
@@ -164,12 +196,26 @@ async function handleMcp(request, env) {
   } catch {
     return jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error: body must be JSON" } }, 400);
   }
+  if (Array.isArray(payload) && payload.length === 0) {
+    return jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: empty batch" } });
+  }
   const messages = Array.isArray(payload) ? payload : [payload];
   const responses = [];
   for (const message of messages) {
-    const id = message && "id" in message ? message.id : null;
-    const method = message && message.method;
-    const isNotification = !message || !("id" in message);
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: expected a JSON-RPC object" } });
+      continue;
+    }
+    const isNotification = !("id" in message);
+    if (isNotification) {
+      continue;
+    }
+    const id = message.id;
+    if (message.jsonrpc !== "2.0" || typeof message.method !== "string" || !message.method) {
+      responses.push({ jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid Request: jsonrpc must be \"2.0\" and method must be a string" } });
+      continue;
+    }
+    const method = message.method;
     try {
       if (method === "initialize") {
         responses.push({
@@ -186,21 +232,33 @@ async function handleMcp(request, env) {
       } else if (method === "tools/list") {
         responses.push({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
       } else if (method === "tools/call") {
-        const params = (message && message.params) || {};
-        const result = await callTool(env, params.name, params.arguments || {});
-        responses.push({ jsonrpc: "2.0", id, result });
-      } else if (isNotification) {
-        continue;
+        const params = message.params;
+        if (!params || typeof params !== "object" || Array.isArray(params) || typeof params.name !== "string" || !params.name) {
+          throw invalidParams("tools/call params.name is required");
+        }
+        if (params.arguments !== undefined && (typeof params.arguments !== "object" || params.arguments === null || Array.isArray(params.arguments))) {
+          throw invalidParams("tools/call params.arguments must be an object");
+        }
+        try {
+          const result = await callTool(env, params.name, params.arguments || {});
+          responses.push({ jsonrpc: "2.0", id, result });
+        } catch (error) {
+          if (error instanceof ToolExecutionError) {
+            responses.push({ jsonrpc: "2.0", id, result: errorTextResult(error.message) });
+          } else {
+            throw error;
+          }
+        }
       } else {
         responses.push({ jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } });
       }
     } catch (error) {
-      if (!isNotification) {
-        responses.push({
-          jsonrpc: "2.0",
-          id,
-          error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
-        });
+      if (error instanceof ProtocolError) {
+        responses.push({ jsonrpc: "2.0", id, error: { code: error.code, message: error.message } });
+      } else if (error instanceof ToolExecutionError) {
+        responses.push({ jsonrpc: "2.0", id, result: errorTextResult(error.message) });
+      } else {
+        responses.push({ jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
       }
     }
   }
@@ -224,14 +282,19 @@ export default {
     }
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/live") {
+        return jsonResponse({ ok: true, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}) });
+      }
       if (url.pathname === "/health") {
-        let published = null;
+        let published;
         try {
-          published = await fetchPagesJson(env, "/api/health.json");
+          published = await fetchPagesJson(env || {}, "/api/health.json");
         } catch (error) {
           published = { error: error instanceof Error ? error.message : String(error) };
+          return jsonResponse({ ok: false, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, 503);
         }
-        return jsonResponse({ ok: true, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env), published });
+        const healthy = Boolean(published) && published.ok === true && published.failure_count === 0 && Number.isInteger(published.law_count) && published.law_count > 0;
+        return jsonResponse({ ok: healthy, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, healthy ? 200 : 503);
       }
       if (url.pathname === "/mcp") {
         return handleMcp(request, env || {});
@@ -240,12 +303,12 @@ export default {
         return jsonResponse({
           name: "higashimatsushima-reiki-mcp",
           description: "MCP wrapper for the Higashimatsushima City ordinances static API on GitHub Pages. The city site remains the primary source.",
-          endpoints: { mcp: "/mcp", health: "/health" },
+          endpoints: { mcp: "/mcp", health: "/health", live: "/live" },
           tools: TOOLS.map((tool) => tool.name),
-          pages_base: pagesBase(env),
+          pages_base: pagesBase(env || {}),
         });
       }
-      return jsonResponse({ error: "Not found", endpoints: { mcp: "/mcp", health: "/health" } }, 404);
+      return jsonResponse({ error: "Not found", endpoints: { mcp: "/mcp", health: "/health", live: "/live" } }, 404);
     } catch (error) {
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
