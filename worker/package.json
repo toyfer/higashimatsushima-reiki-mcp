@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "node --check src/index.js"
+    "check": "node --check src/index.js",
+    "test": "node --test test/index.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^3.0.0"
