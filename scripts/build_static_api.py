@@ -39,6 +39,52 @@ def public_law(data: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k != "plain_text"}
 
 
+# Warnings that always mean the structured output cannot be trusted.
+BLOCKING_WARNING_PREFIXES = ("item_structure_mismatch:", "no_articles_parsed")
+
+
+def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version: str) -> list[str]:
+    """Return a list of integrity problems in the built output (empty = valid)."""
+    problems: list[str] = []
+    laws_dir = api_root / "laws"
+    for entry in index:
+        law_id = str(entry.get("id", ""))
+        path = laws_dir / f"{law_id}.json"
+        if not path.exists():
+            problems.append(f"missing_law_file:{law_id}")
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(f"unreadable_law_file:{law_id}:{exc!r}")
+            continue
+        for field in ("id", "title", "source_url", "articles", "text_sha256"):
+            if field not in data:
+                problems.append(f"missing_field:{law_id}:{field}")
+        if data.get("id") != law_id:
+            problems.append(f"id_mismatch:{law_id}")
+        articles = data.get("articles")
+        if isinstance(articles, list):
+            for article in articles:
+                label = article.get("label", "?")
+                for paragraph in article.get("paragraphs", []):
+                    if "number" not in paragraph or "text" not in paragraph:
+                        problems.append(f"bad_paragraph:{law_id}:{label}")
+                    for item in paragraph.get("items", []):
+                        if "label" not in item or "text" not in item:
+                            problems.append(f"bad_item:{law_id}:{label}")
+    index_path = laws_dir / "index.json"
+    try:
+        built_index = json.loads(index_path.read_text(encoding="utf-8"))
+        if built_index.get("data_version") != data_version:
+            problems.append("index_data_version_mismatch")
+        if len(built_index.get("laws", [])) != len(index):
+            problems.append("index_count_mismatch")
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"unreadable_index:{exc!r}")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build GitHub Pages static API JSON for Higashimatsushima ordinances.")
     parser.add_argument("--status", default="data/status/latest.json")
@@ -75,8 +121,12 @@ def main() -> int:
     laws_dir.mkdir(parents=True, exist_ok=True)
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    selected_count = len(laws)
+    is_full_build = not args.limit and not args.only_id
     index: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    warning_count = 0
+    warnings_by_law: list[dict[str, Any]] = []
 
     for pos, law in enumerate(laws, start=1):
         law_id = str(law.get("id", ""))
@@ -84,6 +134,9 @@ def main() -> int:
         title_hint = str(law.get("title", ""))
         if not SAFE_ID_RE.match(law_id) or not url:
             failures.append({"id": law_id, "url": url, "error": "invalid_status_entry"})
+            print(f"WARNING: {law_id} invalid_status_entry", file=sys.stderr)
+            if args.fail_on_error:
+                return 3
             continue
         try:
             html, _digest = fetch_text(url)
@@ -93,6 +146,21 @@ def main() -> int:
                 return 3
             continue
         data = parse_honbun(html, law_id=law_id, source_url=url, index_title=title_hint)
+        law_warnings = list(data.get("parse_warnings", []))
+        if law_warnings:
+            warning_count += len(law_warnings)
+            warnings_by_law.append({"id": law_id, "warnings": law_warnings})
+        blocking = [w for w in law_warnings if w.startswith(BLOCKING_WARNING_PREFIXES)]
+        if blocking:
+            failures.append({"id": law_id, "url": url, "error": "; ".join(blocking)})
+            print(f"WARNING: {law_id} structural parse mismatch: {'; '.join(blocking)}", file=sys.stderr)
+            if args.fail_on_error:
+                return 3
+            continue
+        if law_warnings and args.fail_on_error:
+            failures.append({"id": law_id, "url": url, "error": "; ".join(law_warnings)})
+            print(f"WARNING: {law_id} parse warnings treated as failures: {'; '.join(law_warnings)}", file=sys.stderr)
+            return 3
         data["fetched_at_utc"] = generated_at
         data["menu_sha256"] = menu_hash
         data["content_current_date"] = current_date
@@ -131,13 +199,37 @@ def main() -> int:
         "failure_count": len(failures),
         "failures": failures,
     }
+    meta["selected_count"] = selected_count
+    meta["warning_count"] = warning_count
+    meta["warnings"] = warnings_by_law
     dump_json(api_root / "meta.json", meta)
     dump_json(api_root / "laws" / "index.json", {"data_version": version, "generated_at_utc": generated_at, "laws": index})
     dump_json(api_root / "search" / "title-index.json", {"data_version": version, "laws": [{"id": x["id"], "title": x["title"], "ordinance_number": x["ordinance_number"]} for x in index]})
-    dump_json(api_root / "health.json", {"ok": len(index) > 0, "law_count": len(index), "failure_count": len(failures), "data_version": version})
+    validation_problems = validate_built_api(api_root, index, version)
+    count_matches = len(index) + len(failures) == selected_count
+    full_build_complete = (not is_full_build) or (len(index) == selected_count and not failures)
+    healthy = bool(index) and not failures and not validation_problems and count_matches and full_build_complete
+    health = {
+        "ok": healthy,
+        "law_count": len(index),
+        "selected_count": selected_count,
+        "failure_count": len(failures),
+        "warning_count": warning_count,
+        "validation_problems": validation_problems,
+        "data_version": version,
+    }
+    dump_json(api_root / "health.json", health)
 
     (out_root / ".nojekyll").write_text("", encoding="utf-8")
     print(json.dumps(meta, ensure_ascii=False, indent=2))
+    if validation_problems:
+        print(f"ERROR: built API failed validation: {validation_problems}", file=sys.stderr)
+        return 5
+    if args.fail_on_error and failures:
+        return 3
+    if is_full_build and (failures or len(index) != selected_count):
+        print(f"ERROR: full build incomplete: generated {len(index)}/{selected_count} with {len(failures)} failure(s)", file=sys.stderr)
+        return 5
     return 0 if index else 4
 
 
