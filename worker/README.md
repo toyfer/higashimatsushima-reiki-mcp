@@ -5,7 +5,8 @@ This Worker wraps the GitHub Pages static API and exposes it as a stateless MCP 
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Service description, tool names, and the configured Pages base |
-| `GET /health` | Worker health plus the published `api/health.json` contents |
+| `GET /health` | Readiness: Worker plus published API. `ok: false` with HTTP 503 when Pages cannot be fetched or the published API reports failures |
+| `GET /live` | Liveness only. Always HTTP 200 with `ok: true`; does not fetch Pages |
 | `GET /mcp` | Human-readable endpoint description |
 | `POST /mcp` | Stateless JSON-RPC for MCP clients |
 
@@ -20,7 +21,7 @@ This Worker wraps the GitHub Pages static API and exposes it as a stateless MCP 
 
 Law IDs must match `^r\d+RG\d+$`, for example `r122RG00000002`. Invalid IDs are rejected before any fetch, so the endpoint cannot be used to probe arbitrary paths on the Pages host.
 
-Tool results are returned as MCP text content containing pretty-printed JSON. Unknown methods return JSON-RPC error `-32601`. Tool failures return `-32000` with the underlying message.
+Tool results are returned as MCP text content containing pretty-printed JSON. Unknown methods return JSON-RPC error `-32601`. Unknown tools and invalid arguments return JSON-RPC error `-32602` (protocol error). Failures while executing a tool, such as a GitHub Pages fetch failure, are returned as a normal result with `isError: true`. Requests without an `id` are notifications and never receive a response, including in batches.
 
 ## Configuration
 
