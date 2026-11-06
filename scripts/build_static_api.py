@@ -93,6 +93,13 @@ def main() -> int:
                 return 3
             continue
         data = parse_honbun(html, law_id=law_id, source_url=url, index_title=title_hint)
+        blocking = [w for w in data.get("parse_warnings", []) if w.startswith("item_structure_mismatch:")]
+        if blocking:
+            failures.append({"id": law_id, "url": url, "error": "; ".join(blocking)})
+            print(f"WARNING: {law_id} structural parse mismatch: {'; '.join(blocking)}", file=sys.stderr)
+            if args.fail_on_error:
+                return 3
+            continue
         data["fetched_at_utc"] = generated_at
         data["menu_sha256"] = menu_hash
         data["content_current_date"] = current_date

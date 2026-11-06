@@ -113,7 +113,12 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         if ordinance_number and line == ordinance_number and mode == "preamble":
             continue
 
-        if HEADING_LINE_RE.match(line) and mode in {"preamble", "article"} and not APPENDIX_TABLE_RE.match(line):
+        if (
+            HEADING_LINE_RE.match(line)
+            and not ITEM_RE.match(line)
+            and mode in {"preamble", "article"}
+            and not APPENDIX_TABLE_RE.match(line)
+        ):
             pending_heading = line
             if current_article is not None:
                 current_article["_lines"].append(line)
@@ -156,8 +161,6 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             continue
 
         if APPENDIX_TABLE_RE.match(line):
-            # Inline references such as 行政職給料表(別表第1) remain article text.
-            # Treat only a line that starts with 別表第... as an appendix heading.
             if re.match(r"^別表第[0-9０-９一二三四五六七八九十]+", line):
                 flush_article()
                 mode = "appendix"
@@ -197,6 +200,20 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
 
     body_text = "\n".join(preamble)
     plain_text = "\n".join(lines)
+    parse_warnings: list[str] = []
+    if not articles and not body_text:
+        parse_warnings.append("no_articles_parsed")
+    for parsed_article in articles:
+        item_lines = [
+            article_line
+            for article_line in parsed_article["text"].splitlines()
+            if ITEM_RE.match(article_line.strip())
+        ]
+        structured_items = sum(len(paragraph.get("items", [])) for paragraph in parsed_article["paragraphs"])
+        if len(item_lines) != structured_items:
+            parse_warnings.append(
+                f"item_structure_mismatch:{parsed_article['label']}:text={len(item_lines)}:structured={structured_items}"
+            )
     return {
         "id": law_id,
         "title": title or index_title,
@@ -215,7 +232,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "history": parse_history(html),
         "plain_text": plain_text,
         "text_sha256": hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),
-        "parse_warnings": ([] if articles or body_text else ["no_articles_parsed"]),
+        "parse_warnings": parse_warnings,
     }
 
 
