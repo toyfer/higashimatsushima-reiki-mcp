@@ -1,0 +1,113 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-higashimatsushima-reiki-mcp
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run check
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: npm test
+      - name: Write secrets file
+        if: steps.test.outcome == 'success'
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+        run: |
+          if [ -z "$AUTH_TOKEN" ]; then echo "::error::AUTH_TOKEN secret is not set"; exit 1; fi
+          printf 'AUTH_TOKEN=%s\n' "$AUTH_TOKEN" > .secrets
+          chmod 600 .secrets
+      - name: Deploy
+        id: deploy
+        if: steps.test.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          npx wrangler deploy --secrets-file .secrets 2>&1 | tee deploy.log
+      - name: Remove secrets file
+        if: always()
+        run: rm -f .secrets
+      - name: Verify endpoints
+        id: verify
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+        run: |
+          sleep 10
+          live=$(curl -s -o /dev/null -w "%{http_code}" https://higashimatsushima-reiki-mcp.toys-master.dev/live)
+          echo "GET /live -> $live"; test "$live" = "200"
+          health=$(curl -s -o /dev/null -w "%{http_code}" https://higashimatsushima-reiki-mcp.toys-master.dev/health)
+          echo "GET /health -> $health"; test "$health" = "200"
+          noauth=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          echo "POST /mcp no token -> $noauth"; test "$noauth" = "401"
+          wrong=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H 'Authorization: Bearer wrong-token-value' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          echo "POST /mcp wrong token -> $wrong"; test "$wrong" = "401"
+          curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -q reiki_status
+          curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reiki_status","arguments":{}}}' | grep -q 1192
+          echo "POST /mcp valid token -> 200 tools/list + reiki_status 1192"
+      - name: Report to issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SHA="${{ github.sha }}"
+          if [ "$TEST_OUTCOME" != "success" ]; then STATUS=failure; elif [ "$DEPLOY_OUTCOME" = "success" ] && [ "$VERIFY_OUTCOME" = "success" ]; then STATUS=success; else STATUS=failure; fi
+          {
+            echo "## Worker deploy $STATUS"
+            echo
+            echo "- run: $RUN_URL"
+            echo "- sha: \`$SHA\`"
+            echo "- test: $TEST_OUTCOME"
+            echo "- deploy: ${DEPLOY_OUTCOME:-skipped}"
+            echo "- verify: ${VERIFY_OUTCOME:-skipped}"
+            echo
+            echo "### log (tail)"
+            echo '```'
+            if [ -f deploy.log ]; then grep -v AUTH_TOKEN deploy.log | tail -c 4000; else echo "(no deploy.log)"; fi
+            echo
+            echo '```'
+          } > report.md
+          NUM=$(gh issue list --search "CI worker deploy log in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            URL=$(gh issue create --title "CI worker deploy log" --body "Actions の Worker Deploy 結果。失敗時の wrangler ログを読む。")
+            NUM=${URL##*/}
+          fi
+          gh issue comment "$NUM" --body-file report.md
+      - name: Fail if test, deploy or verify failed
+        if: always() && (steps.test.outcome != 'success' || steps.deploy.outcome != 'success' || steps.verify.outcome != 'success')
+        run: exit 1
