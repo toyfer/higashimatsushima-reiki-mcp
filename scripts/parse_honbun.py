@@ -48,23 +48,27 @@ def extract_lines(html: str) -> tuple[list[str], str]:
     return lines, scope
 
 
-_PAREN_PAIRS = {"(": ")", "（": "）"}
-_PAREN_CLOSES = set(_PAREN_PAIRS.values())
+_PAREN_OPENS = {"(", "（"}
+_PAREN_CLOSES = {")", "）"}
 
 
 def split_leading_heading(rest: str) -> tuple[str, str]:
-    if not rest or rest[0] not in _PAREN_PAIRS:
+    # Japanese ordinance headings mix full-width （） and half-width () freely,
+    # including mismatched pairs such as (見出し）.  Count nesting depth across
+    # both widths instead of requiring each close to match its opener's width,
+    # so nested headings stay intact while legacy mismatched pairs still split.
+    if not rest or rest[0] not in _PAREN_OPENS:
         return "", rest
-    expected: list[str] = []
+    depth = 0
     for index, char in enumerate(rest):
-        if char in _PAREN_PAIRS:
-            expected.append(_PAREN_PAIRS[char])
+        if char in _PAREN_OPENS:
+            depth += 1
         elif char in _PAREN_CLOSES:
-            if not expected or char != expected[-1]:
-                return "", rest
-            expected.pop()
-            if not expected:
+            depth -= 1
+            if depth == 0:
                 return rest[: index + 1], rest[index + 1 :].strip()
+            if depth < 0:
+                return "", rest
     return "", rest
 
 

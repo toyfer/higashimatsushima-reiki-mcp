@@ -130,6 +130,20 @@ INLINE_HEADING_REVERSED = PAREN_ITEM.replace(
     "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
     "<p><span>第2条</span>　<span>(職員（非常勤）の勤務)職員の勤務条件は、別に定める。</span></p>",
 )
+# Outer pair mixes widths: legacy input the old depth-blind splitter accepted.
+INLINE_HEADING_OUTER_MIXED = PAREN_ITEM.replace(
+    "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
+    "<p><span>第2条</span>　<span>(見出し）見出しに続く本文である。</span></p>",
+)
+INLINE_HEADING_OUTER_MIXED_REVERSED = PAREN_ITEM.replace(
+    "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
+    "<p><span>第2条</span>　<span>（見出し)見出しに続く本文である。</span></p>",
+)
+# The inner pair is width-mismatched while the outer pair is full-width.
+INLINE_HEADING_INNER_MIXED = PAREN_ITEM.replace(
+    "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
+    "<p><span>第2条</span>　<span>（職員(非常勤）の勤務）職員の勤務条件は、別に定める。</span></p>",
+)
 
 BRANCHED = """
 <html><head><title>東松島市枝番検証条例</title></head><body>
@@ -197,6 +211,27 @@ class InlineHeadingTest(unittest.TestCase):
         data = parse_honbun(INLINE_HEADING_REVERSED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
         article = data["articles"][1]
         self.assertEqual(article["heading"], "(職員（非常勤）の勤務)")
+        self.assertEqual(article["paragraphs"][0]["text"], "職員の勤務条件は、別に定める。")
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_inline_outer_mixed_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(INLINE_HEADING_OUTER_MIXED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        article = data["articles"][1]
+        self.assertEqual(article["heading"], "(見出し）")
+        self.assertEqual(article["paragraphs"][0]["text"], "見出しに続く本文である。")
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_inline_outer_mixed_parentheses_heading_reversed_is_preserved(self) -> None:
+        data = parse_honbun(INLINE_HEADING_OUTER_MIXED_REVERSED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        article = data["articles"][1]
+        self.assertEqual(article["heading"], "（見出し)")
+        self.assertEqual(article["paragraphs"][0]["text"], "見出しに続く本文である。")
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_inline_inner_mixed_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(INLINE_HEADING_INNER_MIXED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        article = data["articles"][1]
+        self.assertEqual(article["heading"], "（職員(非常勤）の勤務）")
         self.assertEqual(article["paragraphs"][0]["text"], "職員の勤務条件は、別に定める。")
         self.assertEqual(data["parse_warnings"], [])
 

@@ -325,6 +325,37 @@ for (const badId of [true, [], {}]) {
   });
 }
 
+for (const badId of [true, [], {}]) {
+  for (const malformed of [
+    { jsonrpc: "1.0", method: "ping" },
+    { jsonrpc: "2.0", method: 42 },
+    { jsonrpc: "2.0", method: "" },
+    { method: "ping" },
+  ]) {
+    test(`invalid id ${JSON.stringify(badId)} with malformed envelope ${JSON.stringify(malformed)} is -32600 with id null`, async () => {
+      let called = false;
+      const restore = mockFetch(async () => { called = true; return new Response("{}", { status: 200 }); });
+      try {
+        const res = await worker.fetch(request("/mcp", { ...malformed, id: badId }), {});
+        const body = await res.json();
+        assert.equal(body.error.code, -32600);
+        assert.equal(body.id, null);
+        assert.equal(called, false);
+      } finally { restore(); }
+    });
+  }
+}
+
+test("malformed envelope with valid id echoes that id with -32600", async () => {
+  const restore = mockFetch(pagesJson({}));
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "1.0", id: "keep-me", method: "ping" }), {});
+    const body = await res.json();
+    assert.equal(body.error.code, -32600);
+    assert.equal(body.id, "keep-me");
+  } finally { restore(); }
+});
+
 for (const goodId of ["req-1", 42, null]) {
   test(`valid JSON-RPC id ${JSON.stringify(goodId)} is echoed by ping`, async () => {
     const restore = mockFetch(pagesJson({}));
