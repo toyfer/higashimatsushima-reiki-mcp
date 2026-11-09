@@ -145,7 +145,7 @@ def set_github_output(name: str, value: str) -> None:
         fh.write(f"{name}={value}\n")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check Higashimatsushima ordinance pages for changes.")
     parser.add_argument("--mode", choices=("check", "collect"), default="check")
     parser.add_argument("--menu-url", default=MENU_URL)
@@ -155,7 +155,7 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=300)
     parser.add_argument("--delay", type=float, default=0.35)
     parser.add_argument("--force-collect", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     checked_at = datetime.now(timezone.utc).isoformat()
     previous: dict[str, object] = {}

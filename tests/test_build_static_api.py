@@ -110,7 +110,7 @@ class ValidateBuiltApiTest(unittest.TestCase):
 
 
 class FailOnErrorTest(unittest.TestCase):
-    def run_build(self, laws, fail_on_error: bool) -> int:
+    def run_build(self, laws, fail_on_error: bool) -> tuple[int, dict | None]:
         import build_static_api as builder
         original_fetch = builder.fetch_text
         original_argv = sys.argv
@@ -131,23 +131,27 @@ class FailOnErrorTest(unittest.TestCase):
             builder.fetch_text = fake_fetch  # type: ignore[assignment]
             sys.argv = ["build_static_api.py", "--status", str(status), "--out", str(root / "site"), "--delay", "0"] + (["--fail-on-error"] if fail_on_error else [])
             try:
-                return builder.main()
+                code = builder.main()
+                health_path = root / "site" / "api" / "health.json"
+                health = json.loads(health_path.read_text(encoding="utf-8")) if health_path.exists() else None
+                return code, health
             finally:
                 builder.fetch_text = original_fetch  # type: ignore[assignment]
                 sys.argv = original_argv
 
     def test_invalid_status_entry_fails_with_fail_on_error(self) -> None:
-        code = self.run_build([{"id": "BAD", "url": "", "title": "x"}], fail_on_error=True)
+        code, _health = self.run_build([{"id": "BAD", "url": "", "title": "x"}], fail_on_error=True)
         self.assertEqual(code, 3)
 
     def test_invalid_status_entry_makes_health_not_ok_without_flag(self) -> None:
-        # No valid laws at all -> exit 4 (no index). The invalid-entry path must not report success.
-        code = self.run_build([{"id": "BAD", "url": "", "title": "x"}], fail_on_error=False)
+        laws = [{"id": "BAD", "url": "", "title": "x"}, {"id": "r100RG00000001", "url": "https://example.invalid/1", "title": "有効な条例"}]
+        code, health = self.run_build(laws, fail_on_error=False)
         self.assertNotEqual(code, 0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIsNotNone(health)
+        assert health is not None
+        self.assertFalse(health["ok"])
+        self.assertEqual(health["failure_count"], 1)
+        self.assertEqual(health["expected_count"], 2)
 
 
 class ExpectedCountHealthTest(unittest.TestCase):
@@ -249,3 +253,103 @@ class ExpectedCountHealthTest(unittest.TestCase):
             health["validation_problems"],
         )
         self.assertEqual(health["expected_count"], 1)
+
+
+GOOD_PAGE = (
+    "<html><head><title>t</title></head><body>"
+    '<div id="primary"><p>○t</p><p>令和7年4月1日</p><p>条例第1号</p>'
+    "<p>(趣旨)</p><p>第1条　本文。</p></div><!-- /本文 -->"
+    '<div id="secondary"><h2 class="heading-lv2A">t</h2></div></body></html>'
+)
+# parse_honbun yields item_structure_mismatch for this shape (item before any paragraph).
+MISMATCH_PAGE = (
+    "<html><head><title>t</title></head><body>"
+    '<div id="primary"><p>○t</p><p>令和7年4月1日</p><p>条例第1号</p>'
+    "<p>第1条</p><p>（１）　一つ目の号である。</p><p>（２）　二つ目の号である。</p></div><!-- /本文 -->"
+    '<div id="secondary"><h2 class="heading-lv2A">t</h2></div></body></html>'
+)
+EMPTY_PAGE = (
+    "<html><head><title>t</title></head><body>"
+    '<div id="primary"></div><!-- /本文 -->'
+    '<div id="secondary"><h2 class="heading-lv2A">t</h2></div></body></html>'
+)
+
+
+class BlockingWarningBuildTest(unittest.TestCase):
+    def run_build(self, page: str, fail_on_error: bool):
+        import build_static_api as builder
+
+        original_fetch = builder.fetch_text
+        original_argv = sys.argv
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        status = root / "status.json"
+        laws = [
+            {"id": "r100RG00000001", "url": "https://example.invalid/good", "title": "正常な条例"},
+            {"id": "r100RG00000002", "url": "https://example.invalid/bad", "title": "警告のある条例"},
+        ]
+        status.write_text(
+            json.dumps({"laws": laws, "menu_sha256": "m", "current_date": "令和8年6月26日"}),
+            encoding="utf-8",
+        )
+
+        def fake_fetch(url, timeout=30):
+            if "reiki_menu" in url or url == builder.MENU_URL:
+                return "<html>内容現在 令和8年6月26日</html>", "menuhash"
+            if url.endswith("/good"):
+                return GOOD_PAGE, "h"
+            return page, "h"
+
+        builder.fetch_text = fake_fetch  # type: ignore[assignment]
+        argv = [
+            "build_static_api.py",
+            "--status",
+            str(status),
+            "--out",
+            str(root / "site"),
+            "--delay",
+            "0",
+        ] + (["--fail-on-error"] if fail_on_error else [])
+        sys.argv = argv
+        try:
+            code = builder.main()
+        finally:
+            builder.fetch_text = original_fetch  # type: ignore[assignment]
+            sys.argv = original_argv
+        api = root / "site" / "api"
+        health_path = api / "health.json"
+        meta_path = api / "meta.json"
+        health = json.loads(health_path.read_text(encoding="utf-8")) if health_path.exists() else None
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
+        return code, health, meta
+
+    def test_item_structure_mismatch_fails_build_without_flag(self) -> None:
+        code, health, meta = self.run_build(MISMATCH_PAGE, fail_on_error=False)
+        self.assertNotEqual(code, 0)
+        self.assertIsNotNone(health)
+        assert health is not None and meta is not None
+        self.assertFalse(health["ok"])
+        self.assertEqual(health["failure_count"], 1)
+        self.assertTrue(any("item_structure_mismatch" in f["error"] for f in meta["failures"]), meta["failures"])
+
+    def test_item_structure_mismatch_fails_build_with_fail_on_error(self) -> None:
+        code, _health, _meta = self.run_build(MISMATCH_PAGE, fail_on_error=True)
+        self.assertEqual(code, 3)
+
+    def test_no_articles_parsed_makes_health_not_ok(self) -> None:
+        code, health, meta = self.run_build(EMPTY_PAGE, fail_on_error=False)
+        self.assertNotEqual(code, 0)
+        self.assertIsNotNone(health)
+        assert health is not None and meta is not None
+        self.assertFalse(health["ok"])
+        self.assertTrue(any("no_articles_parsed" in f["error"] for f in meta["failures"]), meta["failures"])
+
+    def test_no_articles_parsed_fails_with_fail_on_error(self) -> None:
+        code, _health, _meta = self.run_build(EMPTY_PAGE, fail_on_error=True)
+        self.assertEqual(code, 3)
+
+
+
+if __name__ == "__main__":
+    unittest.main()

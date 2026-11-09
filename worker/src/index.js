@@ -236,8 +236,14 @@ async function handleMcp(request, env) {
       responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: expected a JSON-RPC object" } });
       continue;
     }
+    const hasValidId = !("id" in message) || message.id === null || typeof message.id === "string" || typeof message.id === "number";
+    const responseId = hasValidId && "id" in message ? message.id : null;
+    if (!hasValidId) {
+      responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: id must be a string, number, or null" } });
+      continue;
+    }
     if (message.jsonrpc !== "2.0" || typeof message.method !== "string" || !message.method) {
-      responses.push({ jsonrpc: "2.0", id: "id" in message ? message.id ?? null : null, error: { code: -32600, message: "Invalid Request: jsonrpc must be \"2.0\" and method must be a string" } });
+      responses.push({ jsonrpc: "2.0", id: responseId, error: { code: -32600, message: "Invalid Request: jsonrpc must be \"2.0\" and method must be a string" } });
       continue;
     }
     if (!("id" in message)) {

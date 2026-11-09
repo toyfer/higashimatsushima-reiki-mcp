@@ -48,6 +48,30 @@ def extract_lines(html: str) -> tuple[list[str], str]:
     return lines, scope
 
 
+_PAREN_OPENS = {"(", "（"}
+_PAREN_CLOSES = {")", "）"}
+
+
+def split_leading_heading(rest: str) -> tuple[str, str]:
+    # Japanese ordinance headings mix full-width （） and half-width () freely,
+    # including mismatched pairs such as (見出し）.  Count nesting depth across
+    # both widths instead of requiring each close to match its opener's width,
+    # so nested headings stay intact while legacy mismatched pairs still split.
+    if not rest or rest[0] not in _PAREN_OPENS:
+        return "", rest
+    depth = 0
+    for index, char in enumerate(rest):
+        if char in _PAREN_OPENS:
+            depth += 1
+        elif char in _PAREN_CLOSES:
+            depth -= 1
+            if depth == 0:
+                return rest[: index + 1], rest[index + 1 :].strip()
+            if depth < 0:
+                return "", rest
+    return "", rest
+
+
 def parse_history(html: str) -> list[dict[str, str]]:
     history: list[dict[str, str]] = []
     for row in ENKAKU_ROW_RE.findall(html):
@@ -134,11 +158,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             heading = pending_heading
             pending_heading = ""
             body_first = rest
-            if rest.startswith("(") or rest.startswith("（"):
-                close = ")" if ")" in rest else "）"
-                if close in rest:
-                    end = rest.index(close) + 1
-                    heading, body_first = rest[:end], rest[end:].strip()
+            if rest.startswith(("(", "（")):
+                inline_heading, inline_body = split_leading_heading(rest)
+                if inline_heading:
+                    heading, body_first = inline_heading, inline_body
             label = f"第{to_int(number_text)}条"
             if branch:
                 label += f"の{to_int(branch)}"
