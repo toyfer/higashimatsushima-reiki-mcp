@@ -30,10 +30,7 @@ class PagesGuardFailClosedTest(unittest.TestCase):
         self.assertIn("was unparsable or law_count was invalid. Refusing to build or deploy", guard)
 
     def test_overwrite_requires_explicit_opt_in(self) -> None:
-        self.assertRegex(
-            self.pages,
-            r'\[ "$ALLOW_SAMPLE_OVERWRITE" = "true" \]',
-        )
+        self.assertIn('[ "$ALLOW_SAMPLE_OVERWRITE" = "true" ]', self.pages)
         self.assertIn("allow_sample_overwrite=true was set explicitly", self.pages)
 
     def test_full_build_still_bypasses_the_sample_guard(self) -> None:
@@ -66,8 +63,8 @@ class PullRequestTestWorkflowTest(unittest.TestCase):
         self.assertIn("python-version: '3.12'", self.workflow)
         self.assertIn("python -m unittest discover -s tests -v", self.workflow)
         self.assertIn("node-version: 22", self.workflow)
-        self.assertNotIn("cache-dependency-path", self.workflow)
-        self.assertNotIn("npm ci", self.workflow)
+        self.assertIn("cache-dependency-path: worker/package-lock.json", self.workflow)
+        self.assertIn("run: npm ci", self.workflow)
         self.assertIn("run: npm run check", self.workflow)
         self.assertIn("run: npm test", self.workflow)
 
@@ -79,10 +76,17 @@ class PullRequestTestWorkflowTest(unittest.TestCase):
         self.assertNotIn("CLOUDFLARE", self.workflow)
         self.assertIn("contents: read", self.workflow)
 
-    def test_worker_job_does_not_require_a_lockfile(self) -> None:
-        self.assertNotIn("npm ci", self.workflow)
-        self.assertNotIn("cache-dependency-path: worker/package-lock.json", self.workflow)
-        self.assertNotIn("run: npm install", self.workflow)
+    def test_lockfile_is_committed_for_npm_ci(self) -> None:
+        lock = ROOT / "worker" / "package-lock.json"
+        self.assertTrue(lock.exists())
+        data = lock.read_text(encoding="utf-8")
+        self.assertIn('"lockfileVersion": 3', data)
+        self.assertIn('"wrangler"', data)
+
+    def test_deploy_workflow_also_uses_npm_ci(self) -> None:
+        deploy = read(ROOT / ".github" / "workflows" / "deploy-worker.yml")
+        self.assertIn("run: npm ci", deploy)
+        self.assertNotIn("run: npm install", deploy)
 
     def test_no_other_workflow_is_triggered_by_pull_request(self) -> None:
         for name in ("pages.yml", "deploy-worker.yml", "daily-reiki-check.yml"):
