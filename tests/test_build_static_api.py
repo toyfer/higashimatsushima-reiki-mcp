@@ -70,6 +70,45 @@ class ValidateBuiltApiTest(unittest.TestCase):
             self.assertIn("index_data_version_mismatch", problems)
 
 
+
+    def test_articles_wrong_type_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api_root = Path(tmp) / "api"
+            index = [write_law(api_root, "r122RG00000002", "v1")]
+            path = api_root / "laws" / "r122RG00000002.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["articles"] = None
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            problems = validate_built_api(api_root, index, "v1")
+            self.assertTrue(any(p.startswith("bad_articles_type:") for p in problems))
+
+    def test_paragraphs_and_items_wrong_type_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api_root = Path(tmp) / "api"
+            index = [write_law(api_root, "r122RG00000002", "v1")]
+            path = api_root / "laws" / "r122RG00000002.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["articles"][0]["paragraphs"] = {}
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            problems = validate_built_api(api_root, index, "v1")
+            self.assertTrue(any(p.startswith("bad_paragraphs_type:") for p in problems))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["articles"][0]["paragraphs"] = [{"number": 1, "text": "本文", "items": "oops"}]
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            problems = validate_built_api(api_root, index, "v1")
+            self.assertTrue(any(p.startswith("bad_items_type:") for p in problems))
+
+    def test_index_laws_wrong_type_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api_root = Path(tmp) / "api"
+            index = [write_law(api_root, "r122RG00000002", "v1")]
+            (api_root / "laws" / "index.json").write_text(
+                json.dumps({"data_version": "v1", "laws": {"id": "r122RG00000002"}}), encoding="utf-8"
+            )
+            problems = validate_built_api(api_root, index, "v1")
+            self.assertIn("index_laws_type_mismatch", problems)
+
+
 class FailOnErrorTest(unittest.TestCase):
     def run_build(self, laws, fail_on_error: bool) -> int:
         import build_static_api as builder

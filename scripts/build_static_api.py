@@ -64,21 +64,40 @@ def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version
         if data.get("id") != law_id:
             problems.append(f"id_mismatch:{law_id}")
         articles = data.get("articles")
-        if isinstance(articles, list):
+        if not isinstance(articles, list):
+            problems.append(f"bad_articles_type:{law_id}")
+        else:
             for article in articles:
+                if not isinstance(article, dict):
+                    problems.append(f"bad_article_entry:{law_id}")
+                    continue
                 label = article.get("label", "?")
-                for paragraph in article.get("paragraphs", []):
+                paragraphs = article.get("paragraphs", [])
+                if not isinstance(paragraphs, list):
+                    problems.append(f"bad_paragraphs_type:{law_id}:{label}")
+                    continue
+                for paragraph in paragraphs:
+                    if not isinstance(paragraph, dict):
+                        problems.append(f"bad_paragraph_entry:{law_id}:{label}")
+                        continue
                     if "number" not in paragraph or "text" not in paragraph:
                         problems.append(f"bad_paragraph:{law_id}:{label}")
-                    for item in paragraph.get("items", []):
-                        if "label" not in item or "text" not in item:
+                    items = paragraph.get("items", [])
+                    if not isinstance(items, list):
+                        problems.append(f"bad_items_type:{law_id}:{label}")
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict) or "label" not in item or "text" not in item:
                             problems.append(f"bad_item:{law_id}:{label}")
     index_path = laws_dir / "index.json"
     try:
         built_index = json.loads(index_path.read_text(encoding="utf-8"))
         if built_index.get("data_version") != data_version:
             problems.append("index_data_version_mismatch")
-        if len(built_index.get("laws", [])) != len(index):
+        built_laws = built_index.get("laws")
+        if not isinstance(built_laws, list):
+            problems.append("index_laws_type_mismatch")
+        elif len(built_laws) != len(index):
             problems.append("index_count_mismatch")
     except (OSError, json.JSONDecodeError) as exc:
         problems.append(f"unreadable_index:{exc!r}")
@@ -213,6 +232,7 @@ def main() -> int:
         "ok": healthy,
         "law_count": len(index),
         "selected_count": selected_count,
+        "expected_count": selected_count,
         "failure_count": len(failures),
         "warning_count": warning_count,
         "validation_problems": validation_problems,
