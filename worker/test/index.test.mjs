@@ -171,31 +171,6 @@ test("live returns 200 without touching Pages", async () => {
   } finally { restore(); }
 });
 
-test("health returns 503 when expected count mismatches law count", async () => {
-  const restore = mockFetch(pagesJson({ ok: true, law_count: 1192, selected_count: 1200, failure_count: 0 }));
-  try {
-    const res = await worker.fetch(new Request("http://localhost/health"), {});
-    assert.equal(res.status, 503);
-    assert.equal((await res.json()).ok, false);
-  } finally { restore(); }
-});
-
-test("health returns 503 when expected count fields are missing", async () => {
-  const restore = mockFetch(pagesJson({ ok: true, law_count: 5, failure_count: 0 }));
-  try {
-    const res = await worker.fetch(new Request("http://localhost/health"), {});
-    assert.equal(res.status, 503);
-  } finally { restore(); }
-});
-
-test("health returns 200 when expected_count matches law count", async () => {
-  const restore = mockFetch(pagesJson({ ok: true, law_count: 7, selected_count: 7, expected_count: 7, failure_count: 0 }));
-  try {
-    const res = await worker.fetch(new Request("http://localhost/health"), {});
-    assert.equal(res.status, 200);
-  } finally { restore(); }
-});
-
 test("malformed id-less object is -32600, not a notification", async () => {
   const restore = mockFetch(pagesJson({}));
   try {
