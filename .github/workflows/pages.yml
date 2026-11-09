@@ -117,7 +117,7 @@ jobs:
           echo "Index changed: $changed"
 
       - name: Collect ordinance index
-        if: steps.guard.outputs.mode == 'full' || steps.index_changed.outputs.changed == 'true'
+        if: steps.guard.outputs.mode == 'full'
         run: python scripts/daily_check.py --mode collect --delay 0.35
 
       - name: Build full static API
