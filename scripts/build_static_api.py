@@ -120,6 +120,7 @@ def main() -> int:
     if not laws:
         print("No laws in status file. Run daily_check.py --mode collect first.", file=sys.stderr)
         return 2
+    total_count = len(status.get("laws") or [])
     if args.only_id:
         wanted = set(args.only_id)
         laws = [law for law in laws if law.get("id") in wanted]
@@ -219,6 +220,7 @@ def main() -> int:
         "failures": failures,
     }
     meta["selected_count"] = selected_count
+    meta["expected_count"] = total_count
     meta["warning_count"] = warning_count
     meta["warnings"] = warnings_by_law
     dump_json(api_root / "meta.json", meta)
@@ -229,10 +231,10 @@ def main() -> int:
     full_build_complete = (not is_full_build) or (len(index) == selected_count and not failures)
     healthy = bool(index) and not failures and not validation_problems and count_matches and full_build_complete
     health = {
-        "ok": healthy,
+        "ok": healthy and len(index) == total_count,
         "law_count": len(index),
         "selected_count": selected_count,
-        "expected_count": selected_count,
+        "expected_count": total_count,
         "failure_count": len(failures),
         "warning_count": warning_count,
         "validation_problems": validation_problems,
