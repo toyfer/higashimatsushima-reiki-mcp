@@ -45,9 +45,12 @@ function bytesEqual(left, right) {
 }
 
 async function bearerOk(authHeader, token) {
-  const prefix = "Bearer ";
   const value = String(authHeader || "");
-  const presented = value.length >= prefix.length && value.slice(0, prefix.length) === prefix ? value.slice(prefix.length) : value;
+  if (value.length < "Bearer ".length || value.slice(0, "Bearer ".length).toLowerCase() !== "bearer ") {
+    return false;
+  }
+  const presented = value.slice("Bearer ".length);
+  if (!presented) return false;
   const hashes = await Promise.all([sha256Bytes(presented), sha256Bytes(token)]);
   return bytesEqual(hashes[0], hashes[1]);
 }
@@ -319,7 +322,7 @@ export default {
           published = { error: error instanceof Error ? error.message : String(error) };
           return jsonResponse({ ok: false, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, 503);
         }
-        const expected = (published && published.expected_count !== undefined) ? published.expected_count : (published && published.selected_count);
+        const expected = published && published.expected_count;
         const healthy = Boolean(published) && published.ok === true && published.failure_count === 0 && Number.isInteger(published.law_count) && published.law_count > 0 && Number.isInteger(expected) && expected > 0 && expected === published.law_count;
         return jsonResponse({ ok: healthy, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, healthy ? 200 : 503);
       }

@@ -64,6 +64,7 @@ jobs:
         env:
           AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
         run: |
+          set -euo pipefail
           sleep 10
           live=$(curl -s -o /dev/null -w "%{http_code}" https://higashimatsushima-reiki-mcp.toys-master.dev/live)
           echo "GET /live -> $live"; test "$live" = "200"
@@ -73,9 +74,11 @@ jobs:
           echo "POST /mcp no token -> $noauth"; test "$noauth" = "401"
           wrong=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H 'Authorization: Bearer wrong-token-value' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
           echo "POST /mcp wrong token -> $wrong"; test "$wrong" = "401"
-          curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -q reiki_status
-          curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reiki_status","arguments":{}}}' | grep -q 1192
-          echo "POST /mcp valid token -> 200 tools/list + reiki_status 1192"
+          tools_list=$(curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          python3 -c 'import json,sys; d=json.loads(sys.argv[1]); names=[t.get("name") for t in d["result"]["tools"]]; assert "reiki_status" in names, names; print("tools/list ok:", ", ".join(names))' "$tools_list"
+          status_body=$(curl -fsS -X POST https://higashimatsushima-reiki-mcp.toys-master.dev/mcp -H 'Content-Type: application/json' -H "Authorization: Bearer $AUTH_TOKEN" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reiki_status","arguments":{}}}')
+          python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "error" not in d, d; texts=[c.get("text","") for c in d["result"]["content"]]; payload=json.loads(texts[0]); h=payload["health"]; assert h.get("ok") is True, h; assert h.get("failure_count")==0, h; assert h.get("expected_count")==h.get("law_count"), h; print("reiki_status ok:", h.get("law_count"), "laws (expected==law_count, ok=true)")' "$status_body"
+          echo "POST /mcp valid token -> 200 tools/list + reiki_status ok"
       - name: Report to issue
         if: always()
         env:

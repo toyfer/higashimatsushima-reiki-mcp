@@ -124,7 +124,7 @@ test("parse error still returns -32700", async () => {
 });
 
 test("health returns 200 when published API is healthy", async () => {
-  const restore = mockFetch(pagesJson({ ok: true, law_count: 1192, selected_count: 1192, failure_count: 0, data_version: "v1" }));
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 1192, expected_count: 1192, failure_count: 0, data_version: "v1" }));
   try {
     const res = await worker.fetch(new Request("http://localhost/health"), {});
     assert.equal(res.status, 200);
@@ -255,7 +255,7 @@ test("POST /mcp with valid token returns tools/list", async () => {
 });
 
 test("live and GET /mcp stay open when AUTH_TOKEN is set", async () => {
-  const restore = mockFetch(pagesJson({ ok: true, law_count: 7, selected_count: 7, failure_count: 0 }));
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 7, expected_count: 7, selected_count: 7, failure_count: 0 }));
   try {
     const live = await worker.fetch(new Request("http://localhost/live"), { AUTH_TOKEN: "test-secret" });
     assert.equal(live.status, 200);
@@ -263,5 +263,39 @@ test("live and GET /mcp stay open when AUTH_TOKEN is set", async () => {
     assert.equal(desc.status, 200);
     const health = await worker.fetch(new Request("http://localhost/health"), { AUTH_TOKEN: "test-secret" });
     assert.equal(health.status, 200);
+  } finally { restore(); }
+});
+
+test("POST /mcp with raw token (no Bearer scheme) is 401", async () => {
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 7, expected_count: 7, failure_count: 0 }));
+  try {
+    const init = { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "test-secret" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) };
+    const res = await worker.fetch(new Request("http://localhost/mcp", init), { AUTH_TOKEN: "test-secret" });
+    assert.equal(res.status, 401);
+  } finally { restore(); }
+});
+
+test("POST /mcp with lowercase bearer scheme returns tools/list", async () => {
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 7, expected_count: 7, failure_count: 0 }));
+  try {
+    const init = { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "bearer test-secret" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) };
+    const res = await worker.fetch(new Request("http://localhost/mcp", init), { AUTH_TOKEN: "test-secret" });
+    assert.equal(res.status, 200);
+  } finally { restore(); }
+});
+
+test("health returns 503 when only selected_count matches but expected_count is missing (sample shape)", async () => {
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 5, selected_count: 5, failure_count: 0 }));
+  try {
+    const res = await worker.fetch(new Request("http://localhost/health"), {});
+    assert.equal(res.status, 503);
+  } finally { restore(); }
+});
+
+test("health returns 503 when expected_count differs from law count", async () => {
+  const restore = mockFetch(pagesJson({ ok: true, law_count: 5, expected_count: 1192, selected_count: 5, failure_count: 0 }));
+  try {
+    const res = await worker.fetch(new Request("http://localhost/health"), {});
+    assert.equal(res.status, 503);
   } finally { restore(); }
 });
