@@ -148,3 +148,104 @@ class FailOnErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExpectedCountHealthTest(unittest.TestCase):
+    def run_build(self, laws, extra_args=None, tamper_articles=False):
+        import build_static_api as builder
+
+        original_fetch = builder.fetch_text
+        original_parse = builder.parse_honbun
+        original_argv = sys.argv
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        status = root / "status.json"
+        status.write_text(
+            json.dumps({"laws": laws, "menu_sha256": "m", "current_date": "令和8年6月26日"}),
+            encoding="utf-8",
+        )
+
+        def fake_fetch(url, timeout=30):
+            if "reiki_menu" in url or url == builder.MENU_URL:
+                return "<html>内容現在 令和8年6月26日</html>", "menuhash"
+            return (
+                "<html><head><title>t</title></head><body>"
+                '<div id="primary"><p>○t</p><p>令和7年4月1日</p><p>条例第1号</p>'
+                "<p>(趣旨)</p><p>第1条　本文。</p></div><!-- /本文 -->"
+                '<div id="secondary"><h2 class="heading-lv2A">t</h2></div></body></html>'
+            ), "h"
+
+        def tampering_parse(html, **kwargs):
+            data = original_parse(html, **kwargs)
+            data["articles"] = None
+            return data
+
+        builder.fetch_text = fake_fetch  # type: ignore[assignment]
+        if tamper_articles:
+            builder.parse_honbun = tampering_parse  # type: ignore[assignment]
+        argv = [
+            "build_static_api.py",
+            "--status",
+            str(status),
+            "--out",
+            str(root / "site"),
+            "--delay",
+            "0",
+        ] + list(extra_args or [])
+        sys.argv = argv
+        try:
+            code = builder.main()
+        finally:
+            builder.fetch_text = original_fetch  # type: ignore[assignment]
+            builder.parse_honbun = original_parse  # type: ignore[assignment]
+            sys.argv = original_argv
+        api = root / "site" / "api"
+        health = json.loads((api / "health.json").read_text(encoding="utf-8"))
+        meta = json.loads((api / "meta.json").read_text(encoding="utf-8"))
+        return code, health, meta
+
+    @staticmethod
+    def sample_laws():
+        return [
+            {"id": "r100RG00000001", "url": "https://example.invalid/1", "title": "条例A"},
+            {"id": "r100RG00000002", "url": "https://example.invalid/2", "title": "条例B"},
+            {"id": "r100RG00000003", "url": "https://example.invalid/3", "title": "条例C"},
+        ]
+
+    def test_full_build_reports_expected_count_and_ok(self):
+        code, health, meta = self.run_build(self.sample_laws())
+        self.assertEqual(code, 0)
+        self.assertEqual(health["expected_count"], 3)
+        self.assertEqual(health["law_count"], 3)
+        self.assertTrue(health["ok"])
+        self.assertEqual(health["validation_problems"], [])
+        self.assertEqual(meta["expected_count"], 3)
+
+    def test_limit_keeps_full_expected_count_and_not_ok(self):
+        code, health, meta = self.run_build(self.sample_laws(), extra_args=["--limit", "2"])
+        self.assertEqual(health["expected_count"], 3)
+        self.assertEqual(health["selected_count"], 2)
+        self.assertEqual(health["law_count"], 2)
+        self.assertFalse(health["ok"])
+        self.assertEqual(meta["expected_count"], 3)
+
+    def test_only_id_keeps_full_expected_count_and_not_ok(self):
+        code, health, meta = self.run_build(
+            self.sample_laws(), extra_args=["--only-id", "r100RG00000002"]
+        )
+        self.assertEqual(health["expected_count"], 3)
+        self.assertEqual(health["selected_count"], 1)
+        self.assertEqual(health["law_count"], 1)
+        self.assertFalse(health["ok"])
+        self.assertEqual(meta["expected_count"], 3)
+
+    def test_invalid_container_type_makes_health_not_ok(self):
+        code, health, meta = self.run_build(self.sample_laws()[:1], tamper_articles=True)
+        self.assertEqual(code, 5)
+        self.assertFalse(health["ok"])
+        self.assertTrue(
+            any(p.startswith("bad_articles_type:") for p in health["validation_problems"]),
+            health["validation_problems"],
+        )
+        self.assertEqual(health["expected_count"], 1)
