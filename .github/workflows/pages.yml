@@ -18,6 +18,11 @@ on:
         required: true
         default: false
         type: boolean
+      allow_sample_overwrite:
+        description: 'Explicitly allow a 5-law sample run to overwrite a larger published API. Ignored when full_build=true'
+        required: true
+        default: false
+        type: boolean
       delay_seconds:
         description: 'Delay between ordinance page fetches'
         required: true
@@ -58,7 +63,13 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           FULL_BUILD: ${{ inputs.full_build }}
+          ALLOW_SAMPLE_OVERWRITE: ${{ inputs.allow_sample_overwrite }}
         run: |
+          # Issues #27/#29: fail closed whenever the published state cannot be
+          # established, including manual runs. Only an explicit
+          # full_build=true refresh, or an explicit allow_sample_overwrite=true
+          # after a successfully parsed health.json, may replace a larger
+          # published API with the 5-law sample.
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FULL_BUILD" = "true" ]; then
             echo "mode=full" >> "$GITHUB_OUTPUT"
             echo "skip_sample=false" >> "$GITHUB_OUTPUT"
@@ -66,47 +77,31 @@ jobs:
           fi
           health_json=$(mktemp)
           if ! curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json" -o "$health_json"; then
-            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              echo "::warning::Published health.json could not be fetched. Continuing because this is a manual run; it may overwrite the published API."
-              echo "published_ok=false" >> "$GITHUB_OUTPUT"
-              echo "published_count=0" >> "$GITHUB_OUTPUT"
-              echo "mode=sample" >> "$GITHUB_OUTPUT"
-              echo "skip_sample=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::Could not fetch published api/health.json. Refusing to build or deploy so the current published API is preserved."
+            echo "::error::Could not fetch published api/health.json. Refusing to build or deploy so the current published API is preserved. Re-run with full_build=true to rebuild the full API."
             exit 1
           fi
           if ! published_count=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('law_count'); assert isinstance(v,int) and not isinstance(v,bool) and v>=0, v; print(v)" "$health_json"); then
-            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              echo "::warning::Published health.json was unparsable or law_count was not a non-negative integer. Continuing because this is a manual run; it may overwrite the published API."
-              echo "mode=sample" >> "$GITHUB_OUTPUT"
-              echo "skip_sample=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::Published api/health.json was unparsable or law_count was invalid. Refusing to build or deploy so the current published API is preserved."
+            echo "::error::Published api/health.json was unparsable or law_count was invalid. Refusing to build or deploy so the current published API is preserved. Re-run with full_build=true to rebuild the full API."
             exit 1
           fi
           published_ok=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('true' if d.get('ok') is True else 'false')" "$health_json")
           echo "Published law_count: $published_count (ok=$published_ok)"
           echo "published_count=$published_count" >> "$GITHUB_OUTPUT"
           echo "published_ok=$published_ok" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "$published_count" -gt 5 ]; then
-              echo "::warning::Published API already has $published_count laws. This manual sample run will overwrite it with 5 laws."
-            fi
-            echo "mode=sample" >> "$GITHUB_OUTPUT"
-            echo "skip_sample=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           if [ "$published_count" -gt 5 ]; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$ALLOW_SAMPLE_OVERWRITE" = "true" ]; then
+              echo "::warning::Published API already has $published_count laws. allow_sample_overwrite=true was set explicitly, so this manual sample run will overwrite it with 5 laws."
+              echo "mode=sample" >> "$GITHUB_OUTPUT"
+              echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "mode=skip" >> "$GITHUB_OUTPUT"
             echo "skip_sample=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Published API already has $published_count laws. Skipping sample deploy to avoid downgrading it. Run this workflow manually with full_build=true to refresh the full API."
-          else
-            echo "mode=sample" >> "$GITHUB_OUTPUT"
-            echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Published API already has $published_count laws. Skipping sample deploy to avoid downgrading it. Run this workflow manually with full_build=true to refresh the full API, or set allow_sample_overwrite=true to intentionally overwrite with the 5-law sample."
+            exit 0
           fi
+          echo "mode=sample" >> "$GITHUB_OUTPUT"
+          echo "skip_sample=false" >> "$GITHUB_OUTPUT"
 
       - name: Check whether the ordinance index changed
         id: index_changed
