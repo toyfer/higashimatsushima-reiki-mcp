@@ -60,8 +60,8 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-After deployment, point the MCP client at `https://<worker-host>/mcp`. No header token or OAuth is configured in this first version. Add an authentication check in `worker/src/index.js` before exposing the endpoint beyond its intended clients if that requirement appears.
+After deployment, point the MCP client at `https://<worker-host>/mcp`. `POST /mcp` requires `Authorization: Bearer <AUTH_TOKEN>`. Set the secret once with `wrangler secret put AUTH_TOKEN`. For the first deploy of a new Worker, `wrangler deploy --secrets-file` also works. `GET /`, `GET /live`, `GET /health`, `GET /mcp` and `OPTIONS` stay unauthenticated. Local development uses `worker/.dev.vars` (see `worker/.dev.vars.example`; the real file is git-ignored).
 
 ## Auth note
 
-The current endpoint is public and read-only, matching the public static API it wraps. If a future MCP client requires a header token or OAuth, add the check at the top of the `/mcp` handler and keep `/health` behaviour explicit rather than implicit.
+Only `POST /mcp` is authenticated, because the Worker consumes the account's Workers quota while the underlying GitHub Pages data is already public. When `AUTH_TOKEN` is unset (local tests), the check is skipped.

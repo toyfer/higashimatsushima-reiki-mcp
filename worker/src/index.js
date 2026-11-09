@@ -31,6 +31,30 @@ function jsonResponse(data, status = 200, extraHeaders = {}) {
   });
 }
 
+async function sha256Bytes(value) {
+  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value || "")));
+  return new Uint8Array(buffer);
+}
+
+function bytesEqual(left, right) {
+  if (!left || !right || left.length !== right.length) return false;
+  if (typeof crypto.subtle.timingSafeEqual === "function") return crypto.subtle.timingSafeEqual(left, right);
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+async function bearerOk(authHeader, token) {
+  const value = String(authHeader || "");
+  if (value.length < "Bearer ".length || value.slice(0, "Bearer ".length).toLowerCase() !== "bearer ") {
+    return false;
+  }
+  const presented = value.slice("Bearer ".length);
+  if (!presented) return false;
+  const hashes = await Promise.all([sha256Bytes(presented), sha256Bytes(token)]);
+  return bytesEqual(hashes[0], hashes[1]);
+}
+
 function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -190,6 +214,12 @@ async function handleMcp(request, env) {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Method not allowed. Use POST for JSON-RPC." }, 405);
   }
+  if (env && env.AUTH_TOKEN) {
+    const authorization = request.headers.get("authorization") || "";
+    if (!(await bearerOk(authorization, env.AUTH_TOKEN))) {
+      return jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized: missing or invalid Bearer token" } }, 401);
+    }
+  }
   let payload;
   try {
     payload = await request.json();
@@ -206,15 +236,14 @@ async function handleMcp(request, env) {
       responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: expected a JSON-RPC object" } });
       continue;
     }
-    const isNotification = !("id" in message);
-    if (isNotification) {
+    if (message.jsonrpc !== "2.0" || typeof message.method !== "string" || !message.method) {
+      responses.push({ jsonrpc: "2.0", id: "id" in message ? message.id ?? null : null, error: { code: -32600, message: "Invalid Request: jsonrpc must be \"2.0\" and method must be a string" } });
+      continue;
+    }
+    if (!("id" in message)) {
       continue;
     }
     const id = message.id;
-    if (message.jsonrpc !== "2.0" || typeof message.method !== "string" || !message.method) {
-      responses.push({ jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid Request: jsonrpc must be \"2.0\" and method must be a string" } });
-      continue;
-    }
     const method = message.method;
     try {
       if (method === "initialize") {
@@ -293,7 +322,8 @@ export default {
           published = { error: error instanceof Error ? error.message : String(error) };
           return jsonResponse({ ok: false, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, 503);
         }
-        const healthy = Boolean(published) && published.ok === true && published.failure_count === 0 && Number.isInteger(published.law_count) && published.law_count > 0;
+        const expected = published && published.expected_count;
+        const healthy = Boolean(published) && published.ok === true && published.failure_count === 0 && Number.isInteger(published.law_count) && published.law_count > 0 && Number.isInteger(expected) && expected > 0 && expected === published.law_count;
         return jsonResponse({ ok: healthy, service: "higashimatsushima-reiki-mcp", pages_base: pagesBase(env || {}), published }, healthy ? 200 : 503);
       }
       if (url.pathname === "/mcp") {
