@@ -243,6 +243,10 @@ async function handleMcp(request, env) {
     if (!("id" in message)) {
       continue;
     }
+    if (message.id !== null && typeof message.id !== "string" && typeof message.id !== "number") {
+      responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: id must be a string, number, or null" } });
+      continue;
+    }
     const id = message.id;
     const method = message.method;
     try {

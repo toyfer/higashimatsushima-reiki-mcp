@@ -1,4 +1,8 @@
+import contextlib
+import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -63,6 +67,143 @@ class DailyCheckTest(unittest.TestCase):
         self.assertFalse(result["truncated"])
         self.assertTrue(result["crawl_complete"])
         self.assertEqual(result["pending_page_count"], 0)
+
+
+MENU_HTML = "<html><body>東松島市例規 （内容現在 令和8年6月26日）</body></html>"
+
+
+def _laws(count: int) -> list[dict[str, str]]:
+    return [
+        {"id": f"r122RG{i:08d}", "title": f"条例{i}", "url": f"https://example.invalid/{i}", "source_page": "https://example.invalid/menu"}
+        for i in range(1, count + 1)
+    ]
+
+
+def _collection(count: int, *, truncated: bool = False, page_errors=None) -> dict:
+    return {
+        "visited_pages": ["https://example.invalid/taikei"],
+        "visited_page_count": 1,
+        "pending_page_count": 1 if truncated else 0,
+        "pending_pages": ["https://example.invalid/pending"] if truncated else [],
+        "crawl_complete": not truncated and not page_errors,
+        "truncated": truncated,
+        "laws": _laws(count),
+        "law_count": count,
+        "page_errors": page_errors or [],
+    }
+
+
+class DailyCheckMainTest(unittest.TestCase):
+    def run_main(self, previous, *, menu_error=None, collection=None):
+        import urllib.error
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        previous_path = root / "previous.json"
+        output_path = root / "out" / "latest.json"
+        summary_path = root / "out" / "latest-summary.md"
+        sentinel = json.dumps(previous, ensure_ascii=False, indent=2) + "\n" if previous is not None else None
+        if sentinel is not None:
+            previous_path.write_text(sentinel, encoding="utf-8")
+            # Output starts as a copy of the previous status so tests can prove
+            # that failure paths leave a healthy status untouched.
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(sentinel, encoding="utf-8")
+
+        original_fetch = daily_check.fetch_text
+        original_collect = daily_check.collect_from_taikei
+        collect_calls: list[tuple] = []
+
+        def fake_fetch(url, timeout=30):
+            if menu_error is not None:
+                raise menu_error
+            return MENU_HTML, "menu-hash"
+
+        def fake_collect(max_pages, delay_seconds):
+            collect_calls.append((max_pages, delay_seconds))
+            assert collection is not None
+            return collection
+
+        daily_check.fetch_text = fake_fetch  # type: ignore[assignment]
+        daily_check.collect_from_taikei = fake_collect  # type: ignore[assignment]
+        argv = [
+            "--mode", "check",
+            "--menu-url", "https://example.invalid/menu",
+            "--previous", str(previous_path),
+            "--output", str(output_path),
+            "--summary", str(summary_path),
+            "--max-pages", "10",
+            "--delay", "0",
+        ]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = daily_check.main(argv)
+        finally:
+            daily_check.fetch_text = original_fetch  # type: ignore[assignment]
+            daily_check.collect_from_taikei = original_collect  # type: ignore[assignment]
+        output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else None
+        output = json.loads(output_text) if output_text else None
+        return code, output, output_text, sentinel, collect_calls
+
+    @staticmethod
+    def previous_status(count: int = 100) -> dict:
+        return {
+            "menu_sha256": "menu-hash",
+            "current_date": "令和8年6月26日",
+            "law_count": count,
+            "laws": _laws(count),
+            "visited_page_count": 3,
+            "pending_page_count": 0,
+            "crawl_complete": True,
+        }
+
+    def test_unchanged_menu_reuses_previous_without_collecting(self) -> None:
+        code, output, _text, _sentinel, calls = self.run_main(self.previous_status(), collection=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        assert output is not None
+        self.assertFalse(output["changed"])
+        self.assertEqual(output["law_count"], 100)
+        self.assertEqual(len(output["laws"]), 100)
+
+    def test_suspicious_drop_returns_5_and_preserves_output(self) -> None:
+        previous = self.previous_status(100)
+        previous["menu_sha256"] = "old-hash"
+        code, _output, text, sentinel, _calls = self.run_main(previous, collection=_collection(80))
+        self.assertEqual(code, 5)
+        self.assertEqual(text, sentinel)
+
+    def test_menu_fetch_failure_returns_2_and_preserves_output(self) -> None:
+        import urllib.error
+
+        code, _output, text, sentinel, _calls = self.run_main(
+            self.previous_status(), menu_error=urllib.error.URLError("down"), collection=None
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(text, sentinel)
+
+    def test_empty_collection_returns_4_and_preserves_output(self) -> None:
+        previous = self.previous_status(100)
+        previous["menu_sha256"] = "old-hash"
+        code, _output, text, sentinel, _calls = self.run_main(previous, collection=_collection(0))
+        self.assertEqual(code, 4)
+        self.assertEqual(text, sentinel)
+
+    def test_page_errors_return_3_and_preserve_output(self) -> None:
+        previous = self.previous_status(100)
+        previous["menu_sha256"] = "old-hash"
+        collection = _collection(100, page_errors=[{"url": "https://example.invalid/x", "error": "URLError"}])
+        code, _output, text, sentinel, _calls = self.run_main(previous, collection=collection)
+        self.assertEqual(code, 3)
+        self.assertEqual(text, sentinel)
+
+    def test_truncated_crawl_returns_6_and_preserves_output(self) -> None:
+        previous = self.previous_status(100)
+        previous["menu_sha256"] = "old-hash"
+        code, _output, text, sentinel, _calls = self.run_main(previous, collection=_collection(50, truncated=True))
+        self.assertEqual(code, 6)
+        self.assertEqual(text, sentinel)
 
 
 if __name__ == "__main__":

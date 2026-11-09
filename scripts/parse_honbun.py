@@ -48,6 +48,26 @@ def extract_lines(html: str) -> tuple[list[str], str]:
     return lines, scope
 
 
+_PAREN_PAIRS = {"(": ")", "（": "）"}
+_PAREN_CLOSES = set(_PAREN_PAIRS.values())
+
+
+def split_leading_heading(rest: str) -> tuple[str, str]:
+    if not rest or rest[0] not in _PAREN_PAIRS:
+        return "", rest
+    expected: list[str] = []
+    for index, char in enumerate(rest):
+        if char in _PAREN_PAIRS:
+            expected.append(_PAREN_PAIRS[char])
+        elif char in _PAREN_CLOSES:
+            if not expected or char != expected[-1]:
+                return "", rest
+            expected.pop()
+            if not expected:
+                return rest[: index + 1], rest[index + 1 :].strip()
+    return "", rest
+
+
 def parse_history(html: str) -> list[dict[str, str]]:
     history: list[dict[str, str]] = []
     for row in ENKAKU_ROW_RE.findall(html):
@@ -134,11 +154,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             heading = pending_heading
             pending_heading = ""
             body_first = rest
-            if rest.startswith("(") or rest.startswith("（"):
-                close = ")" if ")" in rest else "）"
-                if close in rest:
-                    end = rest.index(close) + 1
-                    heading, body_first = rest[:end], rest[end:].strip()
+            if rest.startswith(("(", "（")):
+                inline_heading, inline_body = split_leading_heading(rest)
+                if inline_heading:
+                    heading, body_first = inline_heading, inline_body
             label = f"第{to_int(number_text)}条"
             if branch:
                 label += f"の{to_int(branch)}"

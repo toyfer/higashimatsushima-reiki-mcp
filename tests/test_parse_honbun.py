@@ -122,6 +122,112 @@ class ParseHonbunTest(unittest.TestCase):
         self.assertIn("上河戸36番地1", data["body_text"])
         self.assertEqual(data["parse_warnings"], [])
 
+INLINE_HEADING = PAREN_ITEM.replace(
+    "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
+    "<p><span>第2条</span>　<span>（職員(非常勤)の勤務）職員の勤務条件は、別に定める。</span></p>",
+)
+INLINE_HEADING_REVERSED = PAREN_ITEM.replace(
+    "<p><span>第2条</span>　<span>期限の特例を定める。</span></p>",
+    "<p><span>第2条</span>　<span>(職員（非常勤）の勤務)職員の勤務条件は、別に定める。</span></p>",
+)
+
+BRANCHED = """
+<html><head><title>東松島市枝番検証条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><div class="head"><p><span>○東松島市枝番検証条例</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>条例第99号</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p class="title"><span>（趣旨）</span></p><p><span>第1条</span>　<span>この条例は検証用である。</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p><span>第2条の2</span>　<span>枝番の本文である。</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p><span>第３条</span>　<span>全角条番号の本文である。</span></p></div></div></div>
+<div><div class="eline"><div class="clause"><p><span>２</span>　<span>全角項番号の本文である。</span></p></div></div></div>
+<div><div class="eline"><div class="item"><p><span>（１）</span>　<span>全角の号である。</span></p></div></div></div>
+<div><div class="eline"><p><span>別表第1</span></p></div></div>
+<div><div class="eline"><p><span>別表の内容である。</span></p></div></div>
+<div><div class="eline"><p><span><span class="word-space">附</span>則</span></p></div></div>
+<div><div class="eline"><div class="clause"><p><span>この条例は、令和7年4月1日から施行する。</span></p></div></div></div>
+</div></div></div><!-- /本文 -->
+<div id="secondary"><h2 class="heading-lv2A">東松島市枝番検証条例</h2>
+<p class="datenumber-area mt04">令和7年4月1日　条例第99号</p>
+<span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
+</div>
+<table><tr><td>◆</td><td>令和7年4月1日</td><td>条例第99号</td></tr></table>
+</body></html>
+"""
+
+# Article whose item lines appear before any structured paragraph exists, so the
+# text/structured item counts diverge and the blocking warning must fire (#21).
+ITEM_MISMATCH = """
+<html><head><title>東松島市号検証条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><div class="head"><p><span>○東松島市号検証条例</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>条例第99号</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p><span>第1条</span></p><p><span>（１）　一つ目の号である。</span></p></div></div></div>
+<div><div class="eline"><div class="item"><p><span>（２）</span>　<span>二つ目の号である。</span></p></div></div></div>
+<div><div class="eline"><p><span><span class="word-space">附</span>則</span></p></div></div>
+<div><div class="eline"><div class="clause"><p><span>この条例は、令和7年4月1日から施行する。</span></p></div></div></div>
+</div></div></div><!-- /本文 -->
+<div id="secondary"><h2 class="heading-lv2A">東松島市号検証条例</h2>
+<p class="datenumber-area mt04">令和7年4月1日　条例第99号</p>
+<span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
+</body></html>
+"""
+
+EMPTY_BODY = """
+<html><head><title>東松島市空条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+</div></div></div><!-- /本文 -->
+<div id="secondary"><h2 class="heading-lv2A">東松島市空条例</h2>
+<p class="datenumber-area mt04">令和7年4月1日　条例第99号</p>
+<span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
+</body></html>
+"""
+
+
+class InlineHeadingTest(unittest.TestCase):
+    def test_inline_mixed_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(INLINE_HEADING, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        article = data["articles"][1]
+        self.assertEqual(article["heading"], "（職員(非常勤)の勤務）")
+        self.assertEqual(article["paragraphs"][0]["text"], "職員の勤務条件は、別に定める。")
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_inline_reversed_mixed_parentheses_heading_is_preserved(self) -> None:
+        data = parse_honbun(INLINE_HEADING_REVERSED, law_id="r122RG00000002", source_url="https://example.invalid/2.html")
+        article = data["articles"][1]
+        self.assertEqual(article["heading"], "(職員（非常勤）の勤務)")
+        self.assertEqual(article["paragraphs"][0]["text"], "職員の勤務条件は、別に定める。")
+        self.assertEqual(data["parse_warnings"], [])
+
+
+class ParseWarningTest(unittest.TestCase):
+    def test_item_structure_mismatch_is_reported(self) -> None:
+        data = parse_honbun(ITEM_MISMATCH, law_id="r122RG00000002", source_url="https://example.invalid/mismatch.html")
+        self.assertTrue(
+            any(w.startswith("item_structure_mismatch:第1条:") for w in data["parse_warnings"]),
+            data["parse_warnings"],
+        )
+
+    def test_no_articles_parsed_is_reported(self) -> None:
+        data = parse_honbun(EMPTY_BODY, law_id="r122RG00000002", source_url="https://example.invalid/empty.html")
+        self.assertEqual(data["article_count"], 0)
+        self.assertIn("no_articles_parsed", data["parse_warnings"])
+
+    def test_branch_fullwidth_appendix_and_history(self) -> None:
+        data = parse_honbun(BRANCHED, law_id="r122RG00000002", source_url="https://example.invalid/branch.html")
+        self.assertEqual([a["label"] for a in data["articles"]], ["第1条", "第2条の2", "第3条"])
+        self.assertEqual(data["articles"][1]["number"], 2)
+        self.assertEqual(data["articles"][1]["branch"], 2)
+        third = data["articles"][2]
+        self.assertEqual(third["paragraphs"][1]["number"], 2)
+        self.assertEqual(third["paragraphs"][1]["items"], [{"label": "(1)", "text": "全角の号である。"}])
+        self.assertEqual(len(data["appendix_tables"]), 1)
+        self.assertIn("別表第1", data["appendix_tables"][0])
+        self.assertEqual(data["history"], [{"date": "令和7年4月1日", "number": "条例第99号"}])
+        self.assertEqual(data["parse_warnings"], [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
