@@ -982,7 +982,8 @@ test("search reports counters and index caps for completeness judgement", async 
     for (const key of ["candidates", "candidates_examined", "filtered_out_no_term", "filtered_out_exact", "skipped_per_law", "index_caps"]) {
       assert.ok(key in payload, key);
     }
-    assert.equal(payload.index_caps.pages_fetch_limit, 40);
+    assert.equal(payload.index_caps.pages_fetch_limit, 46);
+    assert.equal(payload.index_caps.posting_shard_limit, 10);
     assert.equal(payload.index_caps.candidate_scan_limit, 300);
   } finally { restore(); }
 });
