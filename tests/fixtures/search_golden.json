@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "description": "Golden set for search algorithm evaluation (issue #55). Each case records must_include (law_id that must appear in top-N), must_exclude (law_id that must NOT appear), and expected completeness. Queries use the live Pages index via tools/search_eval.mjs.",
+  "cases": [
+    {
+      "name": "exact-phrase-keeps-negation",
+      "query": "還付しない",
+      "args": { "limit": 10 },
+      "must_include": ["r122RG00000234"],
+      "must_exclude": ["r122RG00001790"],
+      "note": "公園条例第14条 must rank; 下水道事業会計規則第51条 (還付した) must not be an exact hit"
+    },
+    {
+      "name": "amount-unit-not-bigram-coincidence",
+      "query": "600万円",
+      "args": { "limit": 5 },
+      "must_exclude": ["r122RG00000524", "r122RG00000727", "r122RG00000742"],
+      "note": "600点 and 500万円 in the same table must not satisfy 600万円"
+    },
+    {
+      "name": "unit-variant-still-matches",
+      "query": "600点",
+      "args": { "limit": 5 },
+      "must_include": ["r122RG00000524"],
+      "note": "The same table must match its own 600点"
+    },
+    {
+      "name": "plain-phrase-no-miss",
+      "query": "随意契約",
+      "args": { "limit": 5 },
+      "must_include": ["r122RG00000506", "r122RG00000513"],
+      "note": "Conventional hits must not regress"
+    },
+    {
+      "name": "multi-term-chunk-scope",
+      "query": "随意契約 600万円",
+      "args": { "limit": 5, "scope": "chunk", "operator": "AND" },
+      "must_exclude": [],
+      "note": "No law contains both terms in one chunk in the current corpus; count=0 with completeness=complete is correct"
+    },
+    {
+      "name": "appendix-reachable",
+      "query": "別表 第2条",
+      "args": { "limit": 5 },
+      "must_include": ["r122RG00000308"],
+      "note": "Appendix tables must be searchable, not only article bodies"
+    },
+    {
+      "name": "single-char-query-rejected",
+      "query": "税",
+      "args": { "limit": 5 },
+      "expect_error": true,
+      "note": "Bigram index cannot answer 1-char queries; must be an explicit error, not count=0"
+    },
+    {
+      "name": "nonsense-query-zero-vs-partial",
+      "query": "スーパー無効語XYZ",
+      "args": { "limit": 5 },
+      "must_include": [],
+      "must_exclude": [],
+      "note": "True zero: completeness must be complete, not partial"
+    }
+  ]
+}

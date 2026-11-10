@@ -359,3 +359,68 @@ class TextIntegrityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CHAPTER_LAW = """
+<html><head><title>東松島市テスト要綱</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><div class="head"><p><span>○東松島市テスト要綱</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>訓令甲第1号</span></p></div></div></div>
+<div><div class="eline"><div class="chapter"><p class="num"><span>第1章</span>　<span>総則</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p class="title"><span>(趣旨)</span></p><p><span>第1条</span>　<span>この要綱は、テストに関する事項を定める。</span></p></div></div></div>
+<div><div class="eline"><div class="chapter"><p class="num"><span>第2章</span>　<span>組織</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p class="title"><span>(組織)</span></p><p><span>第2条</span>　<span>組織は、次に掲げる職員をもって構成する。</span></p></div></div></div>
+<div><div class="eline"><div class="clause"><p><span>2</span>　<span>前項の組織は、別に定める。</span></p></div></div></div>
+</div></div></div><!-- /本文 -->
+<div id="secondary"><h2 class="heading-lv2A">東松島市テスト要綱</h2>
+<p class="datenumber-area mt04">令和7年4月1日　訓令甲第1号</p>
+<span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
+</body></html>
+"""
+
+FORM_LAW = """
+<html><head><title>東松島市テスト規則</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><div class="head"><p><span>○東松島市テスト規則</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>
+<div><div class="eline"><div class="head"><p><span>規則第1号</span></p></div></div></div>
+<div><div class="eline"><div class="article"><p class="title"><span>(趣旨)</span></p><p><span>第1条</span>　<span>この規則は、テストに関する事項を定める。</span></p></div></div></div>
+<div><div class="eline"><div class="form_section"><p class="num"><a onClick="fileDownloadAction2('word/r122FG00000001.rtf');return false;" href="javascript:void(0);"><span>別表第1</span><span>(第1条関係)</span></a></p></div></div></div>
+<div><div class="eline"><div id="e000000099" class="xref_frame cm"><p><img src="word/r122FG00000001s.png" alt="画像" class="xref_thumb"/></p></div></div></div>
+</div></div></div><!-- /本文 -->
+<div id="secondary"><h2 class="heading-lv2A">東松島市テスト規則</h2>
+<p class="datenumber-area mt04">令和7年4月1日　規則第1号</p>
+<span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
+</body></html>
+"""
+
+
+class ChapterAndResourceTest(unittest.TestCase):
+    def test_chapters_are_not_mixed_into_article_paragraphs(self) -> None:
+        data = parse_honbun(CHAPTER_LAW, law_id="r122RG00001013", source_url="https://example.invalid/1013.html")
+        chapters = data.get("chapters") or []
+        self.assertEqual([c["text"] for c in chapters], ["第1章 総則", "第2章 組織"])
+        first, second = data["articles"]
+        self.assertEqual(first["chapter"], "第1章")
+        self.assertEqual(first["chapter_title"], "総則")
+        self.assertEqual(second["chapter"], "第2章")
+        for article in data["articles"]:
+            for paragraph in article["paragraphs"]:
+                self.assertNotIn("第1章", paragraph["text"])
+                self.assertNotIn("第2章", paragraph["text"])
+                self.assertNotIn("第1章", article["text"])
+        self.assertEqual([w for w in data["parse_warnings"] if w.startswith("chapter_heading")], [])
+
+    def test_form_resources_are_preserved_and_flagged(self) -> None:
+        data = parse_honbun(FORM_LAW, law_id="r122RG00000308", source_url="https://example.invalid/308.html")
+        resources = data.get("resources") or []
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]["href"], "word/r122FG00000001.rtf")
+        self.assertEqual(resources[0]["image_url"], "word/r122FG00000001s.png")
+        self.assertTrue(
+            any(w.startswith("external_resource_only:") for w in data["parse_warnings"]),
+            data["parse_warnings"],
+        )
+        # The heading is still published so the table stays discoverable.
+        self.assertTrue(any("別表第1" in table for table in data["appendix_tables"]))

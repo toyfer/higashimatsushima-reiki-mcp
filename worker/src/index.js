@@ -336,15 +336,19 @@ function lawUnits(law) {
     });
   });
   const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
+  const resources = Array.isArray(law.resources) ? law.resources : [];
   tables.forEach((table, position) => {
     const text = String(table || "");
     const firstLine = text.split("\n")[0].trim();
+    const resource = resources[position] || null;
     units.push({
       kind: "appendix_table",
       label: (firstLine || `別表${position + 1}`).slice(0, 40),
       heading: "",
       unitIndex: position + 1,
       text,
+      content_status: !text.includes("\n") && resource ? "external_resource_only" : "complete",
+      resource,
     });
   });
   return units;
@@ -524,6 +528,8 @@ async function callTool(env, name, args) {
     const articles = Array.isArray(law.articles) ? law.articles : [];
     const supplements = Array.isArray(law.supplements) ? law.supplements : [];
     const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
+    const chapters = Array.isArray(law.chapters) ? law.chapters : [];
+    const resources = Array.isArray(law.resources) ? law.resources : [];
     const offset = Math.max(Number(input.offset) || 0, 0);
     const limit = Math.min(Math.max(Number(input.limit) || 60, 1), 200);
     const page = articles.slice(offset, offset + limit);
@@ -541,7 +547,25 @@ async function callTool(env, name, args) {
           offset,
           limit,
           next_offset: nextOffset,
-          articles: page.map((article) => ({ label: article.label, heading: article.heading || "" })),
+          chapters: chapters.map((chapter) => ({
+            kind: chapter.kind || "chapter",
+            number: chapter.number || "",
+            title: chapter.title || "",
+            text: chapter.text || "",
+          })),
+          resources: resources.map((resource) =>
+            resource
+              ? { label: resource.label || "", href: resource.href || "", image_url: resource.image_url || "" }
+              : null
+          ),
+          articles: page.map((article) => ({
+            label: article.label,
+            heading: article.heading || "",
+            chapter: article.chapter || "",
+            chapter_title: article.chapter_title || "",
+            section: article.section || "",
+            section_title: article.section_title || "",
+          })),
           supplements: supplements.map((_, position) => (supplements.length > 1 ? `附則${position + 1}` : "附則")),
           appendix_tables: tables.map((table, position) => {
             const firstLine = String(table || "").split("\n")[0].trim();
@@ -582,6 +606,8 @@ async function callTool(env, name, args) {
     }
     const text = String(units[n - 1] || "");
     const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
+    const unitResource = kind === "appendix_table" && Array.isArray(law.resources) ? law.resources[n - 1] || null : null;
+    const contentStatus = kind === "appendix_table" && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
     return textResult(
       JSON.stringify(
         {
@@ -595,6 +621,10 @@ async function callTool(env, name, args) {
           label,
           found: true,
           text,
+          content_status: contentStatus,
+          resource: unitResource
+            ? { label: unitResource.label || "", href: unitResource.href || "", image_url: unitResource.image_url || "" }
+            : null,
           source_url: law.source_url || "",
         },
         null,
@@ -685,6 +715,8 @@ async function callTool(env, name, args) {
           source_url: law.source_url || "",
           score,
           match_type: exact ? "exact" : "approximate",
+          content_status: entry.unit.content_status || "complete",
+          resource: entry.unit.resource || null,
           matched_terms: entry.matches.map((match) => match.term),
           unmatched_terms: terms.map((term) => term.raw).filter((raw) => !entry.matches.some((match) => match.term === raw)),
         };
@@ -878,6 +910,7 @@ async function callTool(env, name, args) {
             snippet: window.snippet,
             highlights: window.highlights,
             match_type: termMatches.find((match) => match.term === entry.raw)?.approximate ? "approximate" : "exact",
+            content_status: row.content_status || "complete",
           });
         }
         const satisfied =
@@ -895,6 +928,7 @@ async function callTool(env, name, args) {
             snippet: window.snippet,
             highlights: window.highlights,
             match_type: exact && row.text ? "exact" : "approximate",
+            content_status: row.content_status || "complete",
             matched_terms: [...group.matches.keys()],
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
             matches: [...group.matches.values()],
@@ -921,6 +955,7 @@ async function callTool(env, name, args) {
         snippet: window.snippet,
         highlights: window.highlights,
         match_type: exact && row.text ? "exact" : "approximate",
+        content_status: row.content_status || "complete",
         matched_terms: matched.map((entry) => entry.raw),
         unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });

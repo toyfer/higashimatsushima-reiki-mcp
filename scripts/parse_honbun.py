@@ -29,6 +29,24 @@ HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,30}第[0-9０-９]+号$")
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
+# Structural headings. The city marks chapters with <div class="chapter"><p
+# class="num"><span>第N章</span><span>見出し</span></p></div> in the body and
+# section headings the same way (issue #50). Without this, chapter/section
+# headings were flattening into the previous article's paragraph text.
+CHAPTER_LINE_RE = re.compile(r"^第([0-9０-９一二三四五六七八九十]+)章\s*(.*)$")
+SECTION_LINE_RE = re.compile(r"^第([0-9０-９一二三四五六七八九十]+)節\s*(.*)$")
+CHAPTER_HTML_RE = re.compile(
+    r'<div class="(?:chapter|section)"><p[^>]*class="num">\s*<span[^>]*>([^<]+)</span>\s*<span[^>]*>([^<]*)</span>',
+    re.S,
+)
+# Appendix / form tables served as downloadable files render as a form_section
+# heading plus an <img> thumbnail (issue #51). html_to_text drops the file
+# links, so collect them separately from the raw body HTML.
+FORM_SECTION_RE = re.compile(
+    r'<div class="form_section"><p[^>]*class="num">\s*<a[^>]*onClick="fileDownloadAction2\(\'([^\']+)\'\)[^>]*>\s*<span[^>]*>([^<]+)</span>\s*<span[^>]*>([^<]*)</span>',
+    re.S,
+)
+XREF_IMG_RE = re.compile(r'<div id="e[0-9]+" class="xref_frame cm"><p><img src="([^"]+)', re.S)
 APPENDIX_TABLE_RE = re.compile(r"^別表")
 # 別表第1 and 別表(第2条関係) are both used by the city site; the second form
 # was silently appended to the last supplement (issue #38).
@@ -86,6 +104,59 @@ def split_leading_heading(rest: str) -> tuple[str, str]:
     return "", rest
 
 
+def parse_chapters(scope: str) -> list[dict[str, str]]:
+    """Collect structural headings from the body scope only.
+
+    The page TOC renders the same headings as <div class="in-chapter">, which
+    teams up with a "(第N条―第M条)" range. The body copy in <div
+    class="chapter"> carries no range, only number and title, so it is the
+    authoritative one for article metadata.
+    """
+    chapters: list[dict[str, str]] = []
+    for number, title in CHAPTER_HTML_RE.findall(scope):
+        label = re.sub(r"\s+", " ", number).strip()
+        heading = re.sub(r"\s+", " ", title).strip()
+        if not label:
+            continue
+        is_section = label.endswith("節")
+        chapters.append(
+            {
+                "kind": "section" if is_section else "chapter",
+                "number": label,
+                "title": heading,
+                "text": f"{label} {heading}".strip(),
+            }
+        )
+    return chapters
+
+
+def parse_resources(scope: str, source_url: str) -> list[dict[str, str]]:
+    """Collect RTF/PNG form resources referenced by appendix headings."""
+    resources: list[dict[str, str]] = []
+    images = [m.group(1) for m in XREF_IMG_RE.finditer(scope)]
+    for position, (href, name, suffix) in enumerate(FORM_SECTION_RE.findall(scope), start=1):
+        label = f"{name}{suffix}".strip()
+        image = ""
+        if position - 1 < len(images):
+            image = images[position - 1]
+        # Attach the thumbnail whose base matches the RTF file name.
+        if not image and href:
+            stem = href.rsplit(".", 1)[0]
+            for candidate in images:
+                if stem and candidate.startswith(stem):
+                    image = candidate
+                    break
+        resources.append(
+            {
+                "label": label,
+                "href": href,
+                "image_url": image,
+                "source_url": source_url,
+            }
+        )
+    return resources
+
+
 def history_scope(html: str) -> str | None:
     match = HISTORY_SCOPE_RE.search(html)
     return match.group(0) if match else None
@@ -115,6 +186,12 @@ def parse_history(html: str) -> list[dict[str, str]]:
 
 def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = "") -> dict[str, Any]:
     lines, _scope = extract_lines(html)
+    chapters = parse_chapters(_scope)
+    resources = parse_resources(_scope, source_url)
+    # Body chapter lines appear verbatim ("第2章 見出し"), while the table
+    # of contents renders the same heading with a "(第N条―第M条)" range.
+    # Match only the verbatim form so the TOC does not consume the counter.
+    chapter_texts = {c["text"] for c in chapters}
     title_match = TITLE_TAG_RE.search(html)
     secondary_match = SECONDARY_TITLE_RE.search(html)
     title = ""
@@ -146,6 +223,8 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     articles: list[dict[str, Any]] = []
     supplements: list[str] = []
     appendix_tables: list[str] = []
+    current_chapter: dict[str, str] | None = None
+    chapter_index = 0
     mode = "preamble"
     current_article: dict[str, Any] | None = None
     pending_heading = ""
@@ -186,6 +265,25 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
                 deferred_heading = line
             continue
 
+        # A chapter/section heading line belongs to the structure, not to
+        # the previous article (issue #50). Skip it and remember it for
+        # the articles that follow.
+        if line in chapter_texts:
+            if chapter_index < len(chapters):
+                current_chapter = chapters[chapter_index]
+                chapter_index += 1
+            continue
+        if CHAPTER_LINE_RE.match(line) or SECTION_LINE_RE.match(line):
+            # Table-of-contents entries ("第2章 見出し(第N条―第M条)") are
+            # navigation, not body text: skip them silently. A bare
+            # chapter line that the body scope did not provide means the
+            # structure was lost, so warn instead of mixing it into a
+            # body paragraph (issue #50).
+            if any(line.startswith(text) for text in chapter_texts):
+                continue
+            structure_warnings.append(f"chapter_heading_unstructured:{line[:30]}")
+            continue
+
         article_match = ARTICLE_START_RE.match(line)
         starts_article = bool(article_match) and not SUPPLEMENT_RE.match(line)
         if deferred_heading:
@@ -219,6 +317,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
                 "branch": to_int(branch) if branch else None,
                 "label": label,
                 "heading": heading,
+                "chapter": current_chapter["number"] if current_chapter and current_chapter["kind"] == "chapter" else "",
+                "chapter_title": current_chapter["title"] if current_chapter and current_chapter["kind"] == "chapter" else "",
+                "section": current_chapter["number"] if current_chapter and current_chapter["kind"] == "section" else "",
+                "section_title": current_chapter["title"] if current_chapter and current_chapter["kind"] == "section" else "",
                 "_lines": [line],
                 "paragraphs": [],
             }
@@ -288,6 +390,16 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             parse_warnings.append(
                 f"item_structure_mismatch:{parsed_article['label']}:text={len(item_lines)}:structured={structured_items}"
             )
+    # Appendix tables that have a downloadable RTF/PNG but no body text are
+    # not silently published as complete tables (issue #51).
+    appendix_only_headings = [
+        table for table in appendix_tables if "\n" not in table.strip()
+    ]
+    if resources and appendix_only_headings:
+        for table in appendix_only_headings:
+            parse_warnings.append(f"external_resource_only:{table[:30]}")
+    elif appendix_only_headings and resources:
+        pass
     history = parse_history(html)
     if not history and history_scope(html) is not None:
         parse_warnings.append("history_table_empty_or_unrecognized")
@@ -306,6 +418,8 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "article_count": len(articles),
         "supplements": supplements,
         "appendix_tables": appendix_tables,
+        "chapters": chapters,
+        "resources": resources,
         "history": history,
         "plain_text": plain_text,
         "text_sha256": hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),

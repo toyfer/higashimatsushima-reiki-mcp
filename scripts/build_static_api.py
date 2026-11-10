@@ -45,7 +45,16 @@ BLOCKING_WARNING_PREFIXES = ("item_structure_mismatch:", "no_articles_parsed")
 # Warnings about an optional structure that is simply absent. They are recorded
 # in meta.json but do not stop a full build: one law without a 沿革 table must
 # not block publishing the other 1191.
-INFORMATIONAL_WARNING_PREFIXES = ("history_table_empty_or_unrecognized", "appendix_marker_unparsed:")
+INFORMATIONAL_WARNING_PREFIXES = (
+    "history_table_empty_or_unrecognized",
+    "appendix_marker_unparsed:",
+    # A heading-only appendix whose body is a downloadable RTF/PNG is
+    # recorded (issue #51) but must not stop publishing the other laws.
+    "external_resource_only:",
+    # A chapter heading that could not be structured is skipped from
+    # body text (issue #50); the law is still publishable.
+    "chapter_heading_unstructured:",
+)
 
 
 def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version: str) -> list[str]:
@@ -82,6 +91,10 @@ def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version
                 number = str(entry.get("number") or "")
                 if not HISTORY_DATE_RE.match(date) or not HISTORY_NUMBER_RE.match(number):
                     problems.append(f"bad_history_row:{law_id}:{date[:20]}:{number[:20]}")
+        for field in ("chapters", "resources"):
+            value = data.get(field)
+            if value is not None and not isinstance(value, list):
+                problems.append(f"bad_{field}_type:{law_id}")
         articles = data.get("articles")
         if not isinstance(articles, list):
             problems.append(f"bad_articles_type:{law_id}")
