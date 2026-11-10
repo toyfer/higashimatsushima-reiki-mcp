@@ -155,7 +155,7 @@ class FailOnErrorTest(unittest.TestCase):
 
 
 class ExpectedCountHealthTest(unittest.TestCase):
-    def run_build(self, laws, extra_args=None, tamper_articles=False):
+    def run_build(self, laws, extra_args=None, tamper_articles=False, inject_warning=None):
         import build_static_api as builder
 
         original_fetch = builder.fetch_text
@@ -185,9 +185,16 @@ class ExpectedCountHealthTest(unittest.TestCase):
             data["articles"] = None
             return data
 
+        def warning_parse(html, **kwargs):
+            data = original_parse(html, **kwargs)
+            data["parse_warnings"] = list(data.get("parse_warnings") or []) + [inject_warning]
+            return data
+
         builder.fetch_text = fake_fetch  # type: ignore[assignment]
         if tamper_articles:
             builder.parse_honbun = tampering_parse  # type: ignore[assignment]
+        elif inject_warning:
+            builder.parse_honbun = warning_parse  # type: ignore[assignment]
         argv = [
             "build_static_api.py",
             "--status",
@@ -225,6 +232,17 @@ class ExpectedCountHealthTest(unittest.TestCase):
         self.assertTrue(health["ok"])
         self.assertEqual(health["validation_problems"], [])
         self.assertEqual(meta["expected_count"], 3)
+
+    def test_informational_warning_does_not_block_fail_on_error(self) -> None:
+        code, health, meta = self.run_build(
+            self.sample_laws(),
+            extra_args=["--fail-on-error"],
+            inject_warning="history_table_empty_or_unrecognized",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(health["ok"])
+        self.assertGreater(health["warning_count"], 0)
+        self.assertEqual(health["failure_count"], 0)
 
     def test_limit_keeps_full_expected_count_and_not_ok(self):
         code, health, meta = self.run_build(self.sample_laws(), extra_args=["--limit", "2"])

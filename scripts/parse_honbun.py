@@ -23,7 +23,9 @@ ENKAKU_ROW_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
 HISTORY_SCOPE_RE = re.compile(r'<div id="shoshi-inf".*?(?:<!-- /書誌情報 -->|</div>\s*</div>)', re.S)
 HISTORY_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table>", re.S)
 HISTORY_DATE_RE = re.compile(r"^(?:(?:明治|大正|昭和|平成|令和)[0-9０-９元]+年|(?:19|20)[0-9]{2}年)")
-HISTORY_NUMBER_RE = re.compile(r"^(?:条例|規則|訓令|告示|指令|規程|要綱)第[0-9０-９]+号")
+# The number cell also carries document kinds such as 訓令甲第28号, so require
+# a 第N号 tail rather than a fixed prefix list.
+HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,12}第[0-9０-９]+号$")
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
