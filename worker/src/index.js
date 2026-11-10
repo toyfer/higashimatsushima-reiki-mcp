@@ -7,8 +7,9 @@ const PROTOCOL_VERSION = "2024-11-05";
 const POSTING_SHARD_COUNT = 16;
 const CHUNK_SHARD_SIZE = 500;
 const MAX_RESULTS_PER_LAW = 3;
-const MAX_PAGES_FETCHES = 40;
+const MAX_PAGES_FETCHES = 46;
 const MAX_CANDIDATES_WALKED = 300;
+const MAX_POSTING_SHARDS = 10;
 const MIN_QUERY_CHARS = 2;
 const SNIPPET_CHARS = 280;
 
@@ -751,7 +752,12 @@ async function callTool(env, name, args) {
         if (!gramShards.has(gram)) gramShards.set(gram, fnv1a32(gram) % POSTING_SHARD_COUNT);
       }
     }
-    const shardIds = [...new Set(gramShards.values())].sort((a, b) => a - b);
+    const shardGramCount = new Map();
+    for (const shard of gramShards.values()) shardGramCount.set(shard, (shardGramCount.get(shard) || 0) + 1);
+    const allShardIds = [...shardGramCount.keys()].sort(
+      (a, b) => shardGramCount.get(b) - shardGramCount.get(a) || a - b
+    );
+    const shardIds = allShardIds.slice(0, MAX_POSTING_SHARDS).sort((a, b) => a - b);
     const scores = new Map();
     const gramChunks = new Map();
     for (const shard of shardIds) {
@@ -775,107 +781,107 @@ async function callTool(env, name, args) {
         gramChunks.set(gram, chunks);
       }
     }
-    const rankedIndexes = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([index]) => index);
+    const gramComplete = (index) =>
+      terms.every(
+        (term) => term.bigrams.length > 0 && term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index))
+      );
+    const ranked = [...scores.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+      .map(([index]) => index);
+    // Candidates holding every bigram of every term are cheap to verify and far
+    // more likely to satisfy AND, so they are walked before coincidental hits.
+    const rankedIndexes = [...ranked.filter(gramComplete), ...ranked.filter((index) => !gramComplete(index))];
+    const byShard = new Map();
+    for (const index of rankedIndexes) {
+      const shard = Math.floor(index / chunkShardSize);
+      if (!byShard.has(shard)) byShard.set(shard, []);
+      byShard.get(shard).push(index);
+    }
+    // A fetch costs one subrequest whatever it returns, so shards holding the
+    // most candidates are read first and the budget buys more examined chunks.
+    const shardOrder = [...byShard.entries()].sort((a, b) => b[1].length - a[1].length || a[0] - b[0]).map(([shard]) => shard);
     const chunkCache = new Map();
     const results = [];
     const lawGroups = new Map();
     const perLaw = new Map();
+    const done = new Set();
     let walked = 0;
     let filteredOutExact = 0;
     let filteredOutNoTerm = 0;
     let skippedPerLaw = 0;
 
-    const loadChunkRow = async (index) => {
-      const shard = Math.floor(index / chunkShardSize);
-      if (!chunkCache.has(shard)) {
-        const data = await loadVersioned(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
-        if (!data) return null;
-        const byIndex = new Map();
-        for (const row of Array.isArray(data.chunks) ? data.chunks : []) byIndex.set(row.i, row);
-        chunkCache.set(shard, byIndex);
-      }
-      return chunkCache.get(shard).get(index) || null;
+    const loadChunkShard = async (shard) => {
+      if (chunkCache.has(shard)) return chunkCache.get(shard);
+      const data = await loadVersioned(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
+      if (!data) return null;
+      const byIndex = new Map();
+      for (const row of Array.isArray(data.chunks) ? data.chunks : []) byIndex.set(row.i, row);
+      chunkCache.set(shard, byIndex);
+      return byIndex;
     };
 
-    for (const index of rankedIndexes) {
-      if (results.length >= limit && (groupBy === "chunk" || scope === "chunk")) break;
-      if (walked >= MAX_CANDIDATES_WALKED) {
-        reasons.add("candidate_scan_limit");
-        break;
-      }
-      walked += 1;
-      const row = await loadChunkRow(index);
-      if (!row) {
-        if (budget.used >= MAX_PAGES_FETCHES) reasons.add("pages_fetch_budget");
-        break;
-      }
+    const evaluateChunk = (index, row) => {
       const body = String(row.text || row.snippet || "");
       const haystack = normalizeWithMap(`${row.label || ""} ${row.heading || ""} ${body}`);
-      let verified;
-      if (exact && row.text) {
-        verified = terms.map((term) => ({ raw: term.raw, match: firstPhraseMatch(haystack, term.normalized) }));
-      } else {
-        verified = terms.map((term) => ({
-          raw: term.raw,
-          match: {
-            found: term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index)),
-            approximate: true,
-            positions: [],
-          },
-        }));
-      }
+      const verified =
+        exact && row.text
+          ? terms.map((term) => ({ raw: term.raw, match: firstPhraseMatch(haystack, term.normalized) }))
+          : terms.map((term) => ({
+              raw: term.raw,
+              match: {
+                found: term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index)),
+                approximate: true,
+              },
+            }));
       const matched = verified.filter((entry) => entry.match.found);
-      // A row can be a candidate (every bigram present) without containing the
-      // phrase, which is exactly the 600点/500万円 trap in issue #52.
-      const bigramComplete = terms.every(
-        (term) => term.bigrams.length > 0 && term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index))
-      );
-      const rejectedByExact = bigramComplete && exact && Boolean(row.text);
+      // A candidate can hold every bigram without the phrase, which is exactly
+      // the 600点/500万円 trap in issue #52.
+      const rejectedByExact = exact && Boolean(row.text);
       if (!matched.length) {
         if (rejectedByExact) filteredOutExact += 1;
         else filteredOutNoTerm += 1;
-        continue;
+        return;
       }
-      // law scope aggregates evidence per law, so the operator is applied after
-      // collecting every term for that law, not per chunk.
       if (scope === "chunk" && operator === "AND" && matched.length !== terms.length) {
         if (rejectedByExact) filteredOutExact += 1;
         else filteredOutNoTerm += 1;
-        continue;
+        return;
       }
       const score = Math.round((scores.get(index) || 0) * 10000) / 10000;
       const termMatches = matched.map((entry) => ({
         term: entry.raw,
         startOrig: entry.match.found && entry.match.start !== undefined ? haystack.map[entry.match.start] : -1,
-        endOrig:
-          entry.match.found && entry.match.end !== undefined ? (haystack.map[entry.match.end - 1] ?? -1) + 1 : -1,
+        endOrig: entry.match.found && entry.match.end !== undefined ? (haystack.map[entry.match.end - 1] ?? -1) + 1 : -1,
         approximate: Boolean(entry.match.approximate),
       }));
 
       if (scope === "law" || groupBy === "law") {
         const lawId = row.law_id;
         if (!lawGroups.has(lawId)) {
-          lawGroups.set(lawId, { law_id: lawId, title: row.title, score, matches: new Map(), best: row });
+          lawGroups.set(lawId, { law_id: lawId, title: row.title, score, matches: new Map() });
         }
         const group = lawGroups.get(lawId);
         group.score = Math.max(group.score, score);
         for (const entry of matched) {
-          if (!group.matches.has(entry.raw)) {
-            const window = buildSearchWindow(haystack, termMatches.filter((match) => match.term === entry.raw), SNIPPET_WINDOW);
-            group.matches.set(entry.raw, {
-              term: entry.raw,
-              label: row.label,
-              heading: row.heading || "",
-              kind: row.kind || "",
-              unit_id: `${lawId}#${row.kind || "unit"}-${row.label}`,
-              snippet: window.snippet,
-              highlights: window.highlights,
-              match_type: termMatches.find((match) => match.term === entry.raw)?.approximate ? "approximate" : "exact",
-            });
-          }
+          if (group.matches.has(entry.raw)) continue;
+          const window = buildSearchWindow(
+            haystack,
+            termMatches.filter((match) => match.term === entry.raw),
+            SNIPPET_WINDOW
+          );
+          group.matches.set(entry.raw, {
+            term: entry.raw,
+            label: row.label,
+            heading: row.heading || "",
+            kind: row.kind || "",
+            unit_id: unitId(lawId, { label: row.label, kind: row.kind, unitIndex: row.unit_index }),
+            snippet: window.snippet,
+            highlights: window.highlights,
+            match_type: termMatches.find((match) => match.term === entry.raw)?.approximate ? "approximate" : "exact",
+          });
         }
-        const groupTerms = [...group.matches.keys()];
-        const satisfied = operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : groupTerms.length > 0;
+        const satisfied =
+          operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : group.matches.size > 0;
         if (satisfied && !results.some((item) => item.law_id === lawId)) {
           const window = buildSearchWindow(haystack, termMatches.slice(0, 1), SNIPPET_WINDOW);
           results.push({
@@ -889,19 +895,18 @@ async function callTool(env, name, args) {
             snippet: window.snippet,
             highlights: window.highlights,
             match_type: exact && row.text ? "exact" : "approximate",
-            matched_terms: groupTerms,
+            matched_terms: [...group.matches.keys()],
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
             matches: [...group.matches.values()],
           });
         }
-        if (results.length >= limit) break;
-        continue;
+        return;
       }
 
       const count = perLaw.get(row.law_id) || 0;
       if (count >= MAX_RESULTS_PER_LAW) {
         skippedPerLaw += 1;
-        continue;
+        return;
       }
       perLaw.set(row.law_id, count + 1);
       const window = buildSearchWindow(haystack, termMatches, SNIPPET_WINDOW);
@@ -919,14 +924,54 @@ async function callTool(env, name, args) {
         matched_terms: matched.map((entry) => entry.raw),
         unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });
+    };
+
+    const collectTarget = Math.min(limit * 3, 60);
+    for (const shard of shardOrder) {
+      if (results.length >= collectTarget) break;
+      if (walked >= MAX_CANDIDATES_WALKED) {
+        reasons.add("candidate_scan_limit");
+        break;
+      }
+      const shardRows = await loadChunkShard(shard);
+      if (!shardRows) {
+        reasons.add("pages_fetch_budget");
+        break;
+      }
+      // One shard holds up to 500 chunks, so evaluating every candidate in it
+      // keeps the fetch budget for coverage instead of repeat downloads.
+      for (const mate of byShard.get(shard) || []) {
+        if (done.has(mate)) continue;
+        if (results.length >= collectTarget) break;
+        if (walked >= MAX_CANDIDATES_WALKED) {
+          reasons.add("candidate_scan_limit");
+          break;
+        }
+        const row = shardRows.get(mate);
+        done.add(mate);
+        if (!row) continue;
+        walked += 1;
+        evaluateChunk(mate, row);
+      }
     }
     if (skippedPerLaw > 0 && results.length < limit) reasons.add("max_results_per_law");
+    results.sort((a, b) => b.score - a.score || String(a.law_id).localeCompare(String(b.law_id)));
+    if (results.length > limit) {
+      results.length = limit;
+      reasons.add("result_limit");
+    }
     const truncationReasons = [...reasons];
+    // Only fetch/scan caps mean "some evidence was never examined"; the display
+    // limit and the per-law cap mean "more matches exist than shown".
+    const coverageReasons = truncationReasons.filter(
+      (reason) => reason === "pages_fetch_budget" || reason === "candidate_scan_limit"
+    );
     const indexCaps = {
       max_postings_per_term: manifest.max_postings_per_term ?? null,
       max_postings_per_law_per_term: manifest.max_postings_per_law_per_term ?? null,
       pages_fetch_limit: MAX_PAGES_FETCHES,
       candidate_scan_limit: MAX_CANDIDATES_WALKED,
+      posting_shard_limit: MAX_POSTING_SHARDS,
     };
     return textResult(
       JSON.stringify(
@@ -946,7 +991,7 @@ async function callTool(env, name, args) {
           filtered_out_no_term: filteredOutNoTerm,
           filtered_out_exact: filteredOutExact,
           skipped_per_law: skippedPerLaw,
-          completeness: truncationReasons.length > 0 ? "partial" : "complete",
+          completeness: coverageReasons.length > 0 ? "partial" : "complete",
           truncated: truncationReasons.length > 0,
           truncation_reasons: truncationReasons,
           index_caps: indexCaps,
