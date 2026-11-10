@@ -1,7 +1,16 @@
 const DEFAULT_PAGES_BASE = "https://toyfer.github.io/higashimatsushima-reiki-mcp";
-const SAFE_ID_RE = /^r\d+RG\d+$/i;
+const LAW_ID_RE = /^r\d+RG\d+$/i;
+const CANONICAL_ID_RE = /^r(\d+)rg(\d+)$/i;
 const CACHE_TTL_SECONDS = 300;
 const PROTOCOL_VERSION = "2024-11-05";
+
+const POSTING_SHARD_COUNT = 16;
+const CHUNK_SHARD_SIZE = 500;
+const MAX_RESULTS_PER_LAW = 3;
+const MAX_PAGES_FETCHES = 40;
+const MAX_CANDIDATES_WALKED = 300;
+const MIN_QUERY_CHARS = 2;
+const SNIPPET_CHARS = 280;
 
 class ProtocolError extends Error {
   constructor(code, message) {
@@ -15,6 +24,15 @@ class ToolExecutionError extends Error {
   constructor(message) {
     super(message);
     this.name = "ToolExecutionError";
+  }
+}
+
+class PagesNotFoundError extends ToolExecutionError {
+  constructor(url) {
+    super(`Pages fetch failed: 404 ${url}`);
+    this.name = "PagesNotFoundError";
+    this.status = 404;
+    this.url = url;
   }
 }
 
@@ -32,13 +50,13 @@ function jsonResponse(data, status = 200, extraHeaders = {}) {
 }
 
 async function sha256Bytes(value) {
-  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value || "")));
+  const buffer = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value || "")));
   return new Uint8Array(buffer);
 }
 
 function bytesEqual(left, right) {
   if (!left || !right || left.length !== right.length) return false;
-  if (typeof crypto.subtle.timingSafeEqual === "function") return crypto.subtle.timingSafeEqual(left, right);
+  if (typeof globalThis.crypto.subtle.timingSafeEqual === "function") return globalThis.crypto.subtle.timingSafeEqual(left, right);
   let difference = 0;
   for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
   return difference === 0;
@@ -68,16 +86,21 @@ function pagesBase(env) {
   return String(raw).replace(/\/+$/, "");
 }
 
-async function fetchPagesJson(env, path) {
-  const url = `${pagesBase(env)}${path}`;
+async function fetchPagesJson(env, path, options = {}) {
+  const suffix = options.cacheBust ? `${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(options.cacheBust)}` : "";
+  const url = `${pagesBase(env)}${path}${suffix}`;
   let response;
   try {
     response = await fetch(url, {
-      headers: { "User-Agent": "higashimatsushima-reiki-mcp-worker/0.1" },
+      headers: { "User-Agent": "higashimatsushima-reiki-mcp-worker/0.2" },
       cf: { cacheTtl: CACHE_TTL_SECONDS, cacheEverything: true },
     });
   } catch (error) {
-    throw new ToolExecutionError(`Pages fetch failed: ${error instanceof Error ? error.message : String(error)} ${url}`);
+    throw new ToolExecutionError(`Pages fetch failed: network ${error instanceof Error ? error.message : String(error)} ${url}`);
+  }
+  if (response.status === 404) {
+    if (options.allowNotFound) return null;
+    throw new PagesNotFoundError(url);
   }
   if (!response.ok) {
     throw new ToolExecutionError(`Pages fetch failed: ${response.status} ${url}`);
@@ -107,12 +130,6 @@ function scoreLaw(law, query) {
   return 0;
 }
 
-const POSTING_SHARD_COUNT = 16;
-const MAX_RESULTS_PER_LAW = 3;
-const MAX_PAGES_FETCHES = 40;
-const CHUNK_SHARD_SIZE = 500;
-const MAX_CANDIDATES_WALKED = 300;
-
 function fnv1a32(value) {
   let result = 2166136261;
   for (const char of String(value)) {
@@ -126,8 +143,12 @@ function normalizeSearchText(value) {
   return String(value || "").normalize("NFKC").toLowerCase();
 }
 
+function searchableText(value) {
+  return normalizeSearchText(value).replace(/[^\p{L}\p{N}]/gu, "");
+}
+
 function searchBigrams(value) {
-  const normalized = normalizeSearchText(value).replace(/[^\p{L}\p{N}]/gu, "");
+  const normalized = searchableText(value);
   if (normalized.length < 2) return normalized ? [normalized] : [];
   const grams = [];
   for (let i = 0; i < normalized.length - 1; i += 1) grams.push(normalized.slice(i, i + 2));
@@ -138,6 +159,135 @@ function invalidParams(message) {
   return new ProtocolError(-32602, message);
 }
 
+function canonicalLawId(value) {
+  const match = CANONICAL_ID_RE.exec(String(value || "").trim());
+  if (!match) return null;
+  return `r${match[1]}RG${match[2]}`;
+}
+
+function requireCanonicalLawId(value) {
+  const canonical = canonicalLawId(value);
+  if (!canonical) throw invalidParams("law_id must match ^r\\d+RG\\d+$");
+  return canonical;
+}
+
+function toPositiveInt(value) {
+  const digits = String(value === undefined || value === null ? "" : value).normalize("NFKC").replace(/[^0-9]/g, "");
+  if (!digits) return null;
+  const number = Number(digits);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function rejectAsof(input) {
+  const value = input.asof;
+  if (value === undefined || value === null || String(value).trim() === "") return;
+  throw invalidParams(
+    "asof is not supported. This MCP serves only the currently published version of every ordinance. Read reiki_status for content_current_date and data_version; historical snapshots are not published."
+  );
+}
+
+function snippetFor(text, grams, limit = SNIPPET_CHARS) {
+  const flat = String(text || "").replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) return flat;
+  let at = -1;
+  for (const gram of grams) {
+    const index = flat.indexOf(gram);
+    if (index >= 0 && (at < 0 || index < at)) at = index;
+  }
+  const start = Math.max(0, (at < 0 ? 0 : at) - 40);
+  return flat.slice(start, start + limit);
+}
+
+function countOccurrences(haystack, needle) {
+  if (!needle) return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+function scoreUnit(text, grams) {
+  const haystack = normalizeSearchText(text);
+  let matched = 0;
+  let hits = 0;
+  for (const gram of grams) {
+    const found = countOccurrences(haystack, gram);
+    if (found > 0) {
+      matched += 1;
+      hits += found;
+    }
+  }
+  if (!matched) return 0;
+  const coverage = matched / grams.length;
+  return Math.round((coverage * 100 + Math.min(hits, 30)) * 100) / 100;
+}
+
+function paragraphText(paragraph) {
+  const parts = [String(paragraph.text || "")];
+  for (const item of paragraph.items || []) {
+    if (item && typeof item === "object") parts.push(String(item.text || ""));
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function articleText(article) {
+  const text = String(article.text || "").replace(/\s+/g, " ").trim();
+  if (text) return text;
+  const paragraphs = Array.isArray(article.paragraphs) ? article.paragraphs : [];
+  return paragraphs.map((paragraph) => paragraphText(paragraph)).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function lawUnits(law) {
+  const units = [];
+  const bodyText = String(law.body_text || "").replace(/\s+/g, " ").trim();
+  const preamble = bodyText || (Array.isArray(law.preamble) ? law.preamble.join(" ").replace(/\s+/g, " ").trim() : "");
+  if (preamble) units.push({ kind: "preamble", label: "前文", heading: "", unitIndex: null, text: preamble });
+  for (const article of Array.isArray(law.articles) ? law.articles : []) {
+    units.push({
+      kind: "article",
+      label: String(article.label || ""),
+      heading: String(article.heading || ""),
+      unitIndex: null,
+      text: articleText(article),
+    });
+  }
+  const supplements = Array.isArray(law.supplements) ? law.supplements : [];
+  supplements.forEach((supplement, position) => {
+    units.push({
+      kind: "supplement",
+      label: supplements.length > 1 ? `附則${position + 1}` : "附則",
+      heading: "",
+      unitIndex: position + 1,
+      text: String(supplement || ""),
+    });
+  });
+  const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
+  tables.forEach((table, position) => {
+    const text = String(table || "");
+    const firstLine = text.split("\n")[0].trim();
+    units.push({
+      kind: "appendix_table",
+      label: (firstLine || `別表${position + 1}`).slice(0, 40),
+      heading: "",
+      unitIndex: position + 1,
+      text,
+    });
+  });
+  return units;
+}
+
+function unitId(lawId, unit) {
+  if (unit.unitIndex) return `${lawId}#${unit.kind}-${unit.unitIndex}`;
+  return `${lawId}#${unit.kind}-${unit.label}`;
+}
+
+async function loadSearchManifest(env) {
+  return fetchPagesJson(env, "/api/search/manifest.json", { allowNotFound: true });
+}
+
 async function callTool(env, name, args) {
   const input = args && typeof args === "object" && !Array.isArray(args) ? args : {};
   if (name === "reiki_status") {
@@ -145,61 +295,352 @@ async function callTool(env, name, args) {
       fetchPagesJson(env, "/api/meta.json"),
       fetchPagesJson(env, "/api/health.json"),
     ]);
-    return textResult(JSON.stringify({ meta, health }, null, 2));
+    const manifest = await fetchPagesJson(env, "/api/search/manifest.json", { allowNotFound: true }).catch(() => null);
+    const search = manifest
+      ? {
+          published: true,
+          data_version: manifest.data_version,
+          kind: manifest.kind,
+          law_count: manifest.law_count,
+          chunk_count: manifest.chunk_count,
+          chunk_shards: Array.isArray(manifest.files?.chunks) ? manifest.files.chunks.length : null,
+          posting_shards: Array.isArray(manifest.files?.postings) ? manifest.files.postings.length : null,
+        }
+      : { published: false };
+    return textResult(JSON.stringify({ meta, health, search }, null, 2));
   }
   if (name === "search_laws_by_title") {
     const query = String(input.query || "").trim();
     if (!query) throw invalidParams("query is required");
     const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
-    const index = await fetchPagesJson(env, "/api/laws/index.json");
+    const index = await fetchPagesJson(env, "/api/search/title-index.json", { allowNotFound: true });
+    if (!index) throw new ToolExecutionError("Pages fetch failed: 404 title index /api/search/title-index.json. The published API has no title index yet; run the Pages workflow with full_build=true.");
     const laws = Array.isArray(index.laws) ? index.laws : [];
-    const ranked = laws
+    const matched = laws
       .map((law) => ({ law, score: scoreLaw(law, query) }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || String(a.law.id).localeCompare(String(b.law.id)))
       .slice(0, limit)
-      .map((item) => item.law);
-    return textResult(JSON.stringify({ query, count: ranked.length, laws: ranked }, null, 2));
+      .map((item) => ({
+        id: item.law.id,
+        title: item.law.title,
+        ordinance_number: item.law.ordinance_number || "",
+        classification: item.law.classification || "",
+        enacted_date: item.law.enacted_date || "",
+        article_count: item.law.article_count === undefined ? null : item.law.article_count,
+        source_url: item.law.source_url || "",
+      }));
+    return textResult(
+      JSON.stringify({ query, data_version: index.data_version || "", count: matched.length, laws: matched }, null, 2)
+    );
   }
   if (name === "get_law") {
-    const lawId = String(input.law_id || "").trim();
-    if (!SAFE_ID_RE.test(lawId)) throw invalidParams("law_id must match ^r\\d+RG\\d+$");
-    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`);
+    rejectAsof(input);
+    const lawId = requireCanonicalLawId(input.law_id);
+    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
+    if (!law) {
+      return textResult(
+        JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
+      );
+    }
     return textResult(JSON.stringify(law, null, 2));
   }
   if (name === "get_article") {
-    const lawId = String(input.law_id || "").trim();
+    rejectAsof(input);
+    const lawId = requireCanonicalLawId(input.law_id);
     const label = String(input.article_label || "").trim();
-    if (!SAFE_ID_RE.test(lawId)) throw invalidParams("law_id must match ^r\\d+RG\\d+$");
     if (!label) throw invalidParams("article_label is required");
-    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`);
+    if (input.item !== undefined && input.item !== null && String(input.item).trim() !== "" && (input.paragraph === undefined || input.paragraph === null || String(input.paragraph).trim() === "")) {
+      throw invalidParams("paragraph is required when item is given");
+    }
+    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
+    if (!law) {
+      return textResult(
+        JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
+      );
+    }
     const articles = Array.isArray(law.articles) ? law.articles : [];
     const found = articles.filter((article) => article.label === label);
     if (!found.length) {
       const available = articles.map((article) => article.label).join(", ");
       return textResult(JSON.stringify({ law_id: lawId, article_label: label, found: false, available_labels: available }, null, 2));
     }
-    return textResult(JSON.stringify({ law_id: lawId, title: law.title, articles: found }, null, 2));
+    const article = found[0];
+    const paragraphWanted = toPositiveInt(input.paragraph);
+    const itemWanted = toPositiveInt(input.item);
+    if (paragraphWanted === null) {
+      return textResult(JSON.stringify({ law_id: lawId, title: law.title, articles: found }, null, 2));
+    }
+    const paragraphs = Array.isArray(article.paragraphs) ? article.paragraphs : [];
+    const paragraph = paragraphs.find((entry) => Number(entry.number) === paragraphWanted);
+    if (!paragraph) {
+      return textResult(
+        JSON.stringify(
+          {
+            law_id: lawId,
+            title: law.title,
+            article_label: label,
+            found: false,
+            available_paragraphs: paragraphs.map((entry) => Number(entry.number)),
+          },
+          null,
+          2
+        )
+      );
+    }
+    const items = Array.isArray(paragraph.items) ? paragraph.items : [];
+    if (itemWanted !== null) {
+      const item = items.find((entry) => toPositiveInt(entry.label) === itemWanted);
+      if (!item) {
+        return textResult(
+          JSON.stringify(
+            {
+              law_id: lawId,
+              title: law.title,
+              article_label: label,
+              paragraph: paragraphWanted,
+              found: false,
+              available_items: items.map((entry) => String(entry.label)),
+            },
+            null,
+            2
+          )
+        );
+      }
+      return textResult(
+        JSON.stringify(
+          {
+            law_id: lawId,
+            title: law.title,
+            data_version: law.data_version || "",
+            content_current_date: law.content_current_date || "",
+            article_label: label,
+            heading: article.heading || "",
+            found: true,
+            paragraph: { number: paragraphWanted, text: paragraph.text, items: [item] },
+          },
+          null,
+          2
+        )
+      );
+    }
+    return textResult(
+      JSON.stringify(
+        {
+          law_id: lawId,
+          title: law.title,
+          data_version: law.data_version || "",
+          content_current_date: law.content_current_date || "",
+          article_label: label,
+          heading: article.heading || "",
+          found: true,
+          paragraph: { number: paragraphWanted, text: paragraph.text, items },
+        },
+        null,
+        2
+      )
+    );
+  }
+  if (name === "get_toc") {
+    rejectAsof(input);
+    const lawId = requireCanonicalLawId(input.law_id);
+    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
+    if (!law) {
+      return textResult(
+        JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
+      );
+    }
+    const articles = Array.isArray(law.articles) ? law.articles : [];
+    const supplements = Array.isArray(law.supplements) ? law.supplements : [];
+    const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
+    const offset = Math.max(Number(input.offset) || 0, 0);
+    const limit = Math.min(Math.max(Number(input.limit) || 60, 1), 200);
+    const page = articles.slice(offset, offset + limit);
+    const nextOffset = offset + page.length < articles.length ? offset + page.length : null;
+    return textResult(
+      JSON.stringify(
+        {
+          law_id: lawId,
+          title: law.title,
+          data_version: law.data_version || "",
+          content_current_date: law.content_current_date || "",
+          article_count: articles.length,
+          supplement_count: supplements.length,
+          appendix_table_count: tables.length,
+          offset,
+          limit,
+          next_offset: nextOffset,
+          articles: page.map((article) => ({ label: article.label, heading: article.heading || "" })),
+          supplements: supplements.map((_, position) => (supplements.length > 1 ? `附則${position + 1}` : "附則")),
+          appendix_tables: tables.map((table, position) => {
+            const firstLine = String(table || "").split("\n")[0].trim();
+            return (firstLine || `別表${position + 1}`).slice(0, 40);
+          }),
+        },
+        null,
+        2
+      )
+    );
+  }
+  if (name === "get_unit") {
+    rejectAsof(input);
+    const lawId = requireCanonicalLawId(input.law_id);
+    const rawKind = String(input.kind || "").trim();
+    const kindAliases = {
+      appendix_table: "appendix_table",
+      beppyo: "appendix_table",
+      table: "appendix_table",
+      supplement: "supplement",
+      suppl: "supplement",
+    };
+    const kind = kindAliases[rawKind];
+    if (!kind) throw invalidParams("kind must be appendix_table (or beppyo) or supplement (or suppl)");
+    const n = toPositiveInt(input.n);
+    if (n === null) throw invalidParams("n must be a 1-based unit number");
+    const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
+    if (!law) {
+      return textResult(
+        JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
+      );
+    }
+    const units = kind === "appendix_table" ? (Array.isArray(law.appendix_tables) ? law.appendix_tables : []) : Array.isArray(law.supplements) ? law.supplements : [];
+    if (n > units.length) {
+      return textResult(
+        JSON.stringify({ law_id: lawId, title: law.title, kind, n, found: false, available_n: units.map((_, position) => position + 1) }, null, 2)
+      );
+    }
+    const text = String(units[n - 1] || "");
+    const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
+    return textResult(
+      JSON.stringify(
+        {
+          law_id: lawId,
+          title: law.title,
+          data_version: law.data_version || "",
+          content_current_date: law.content_current_date || "",
+          kind,
+          n,
+          unit_id: `${lawId}#${kind}-${n}`,
+          label,
+          found: true,
+          text,
+          source_url: law.source_url || "",
+        },
+        null,
+        2
+      )
+    );
   }
   if (name === "search_laws_by_content") {
     const query = String(input.query || "").trim();
     if (!query) throw invalidParams("query is required");
-    const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
     const grams = [...new Set(searchBigrams(query))];
+    if (searchableText(query).length < MIN_QUERY_CHARS) {
+      throw invalidParams(
+        `query must contain at least ${MIN_QUERY_CHARS} searchable characters after normalization, because the body index stores bigrams only. Use a longer phrase such as 税金 instead of 税.`
+      );
+    }
     if (!grams.length) throw invalidParams("query must contain searchable characters");
-    const shardIds = [...new Set(grams.map((g) => fnv1a32(g) % POSTING_SHARD_COUNT))].sort((a, b) => a - b);
+    const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
+    const scopedLawId = input.law_id === undefined || input.law_id === null || String(input.law_id).trim() === "" ? "" : requireCanonicalLawId(input.law_id);
+
+    if (scopedLawId) {
+      const law = await fetchPagesJson(env, `/api/laws/${scopedLawId}.json`, { allowNotFound: true });
+      if (!law) {
+        return textResult(
+          JSON.stringify(
+            {
+              query,
+              law_id: scopedLawId,
+              found: false,
+              reason: "not_found",
+              count: 0,
+              pages_fetches: 1,
+              truncated: false,
+              truncation_reasons: [],
+              results: [],
+            },
+            null,
+            2
+          )
+        );
+      }
+      const units = lawUnits(law);
+      const scored = units
+        .map((unit) => ({ unit, score: scoreUnit(`${unit.label} ${unit.heading} ${unit.text}`, grams) }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || a.unit.label.localeCompare(b.unit.label));
+      const truncated = scored.length > limit;
+      const results = scored.slice(0, limit).map((entry) => ({
+        law_id: law.id,
+        title: law.title,
+        label: entry.unit.label,
+        heading: entry.unit.heading || "",
+        kind: entry.unit.kind,
+        unit_index: entry.unit.unitIndex,
+        unit_id: unitId(law.id, entry.unit),
+        snippet: snippetFor(entry.unit.text, grams),
+        source_url: law.source_url || "",
+        score: entry.score,
+      }));
+      return textResult(
+        JSON.stringify(
+          {
+            query,
+            law_id: scopedLawId,
+            data_version: law.data_version || "",
+            content_current_date: law.content_current_date || "",
+            count: results.length,
+            limit,
+            pages_fetches: 1,
+            candidates: scored.length,
+            truncated,
+            truncation_reasons: truncated ? ["result_limit"] : [],
+            results,
+          },
+          null,
+          2
+        )
+      );
+    }
+
     const budget = { used: 0 };
-    const countedFetch = async (path) => {
-      if (budget.used >= MAX_PAGES_FETCHES) return null;
+    const truncation = new Set();
+    const manifest = await loadSearchManifest(env);
+    budget.used += 1;
+    if (!manifest) {
+      throw new ToolExecutionError(
+        "本文検索インデックス未公開: /api/search/manifest.json returned 404. Run the Pages workflow with full_build=true so the bigram TF-IDF index is published before the Worker serves search_laws_by_content."
+      );
+    }
+    const dataVersion = String(manifest.data_version || "");
+    const chunkShardSize = Number(manifest.chunk_shard_size) || CHUNK_SHARD_SIZE;
+    const countedFetch = async (path, cacheBust) => {
+      if (budget.used >= MAX_PAGES_FETCHES) {
+        truncation.add("pages_fetch_budget");
+        return null;
+      }
       budget.used += 1;
-      return fetchPagesJson(env, path);
+      return fetchPagesJson(env, path, { cacheBust });
     };
-    let fetches = 0;
+    const loadVersioned = async (path) => {
+      const data = await countedFetch(path);
+      if (!data) return null;
+      if (!dataVersion || data.data_version === undefined || data.data_version === dataVersion) return data;
+      const retried = await countedFetch(path, dataVersion);
+      if (retried && retried.data_version === dataVersion) return retried;
+      throw new ToolExecutionError(
+        `search index version mismatch: ${path} reports data_version=${data && data.data_version}, manifest expects ${dataVersion}. Re-run the Pages workflow with full_build=true so every posting and chunk shard is republished, then retry.`
+      );
+    };
+    const shardIds = [...new Set(grams.map((gram) => fnv1a32(gram) % POSTING_SHARD_COUNT))].sort((a, b) => a - b);
     const scores = new Map();
     for (const shard of shardIds) {
-      if (budget.used >= MAX_PAGES_FETCHES) break;
-      const data = await countedFetch(`/api/search/postings-${String(shard).padStart(2, "0")}.json`);
-      fetches = budget.used;
+      if (budget.used >= MAX_PAGES_FETCHES) {
+        truncation.add("pages_fetch_budget");
+        break;
+      }
+      const data = await loadVersioned(`/api/search/postings-${String(shard).padStart(2, "0")}.json`);
       if (!data) break;
       const terms = data && typeof data === "object" ? data.terms || {} : {};
       for (const gram of grams) {
@@ -212,23 +653,25 @@ async function callTool(env, name, args) {
       }
     }
     const rankedIndexes = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([index]) => index);
-    // Lazy display resolution: walk candidates in rank order and fetch only
-    // the chunk shards that hold candidates actually emitted (plus skipped
-    // same-law overflow). Pre-fetching shards for the top-N candidates would
-    // need dozens of files and exhaust the fetch budget before any result
-    // could be displayed.
     const chunkCache = new Map();
     const perLaw = new Map();
     const results = [];
     let walked = 0;
+    let perLawSkipped = 0;
     for (const index of rankedIndexes) {
-      if (results.length >= limit || walked >= MAX_CANDIDATES_WALKED) break;
+      if (results.length >= limit) break;
+      if (walked >= MAX_CANDIDATES_WALKED) {
+        truncation.add("candidate_scan_limit");
+        break;
+      }
       walked += 1;
-      const shard = Math.floor(index / CHUNK_SHARD_SIZE);
+      const shard = Math.floor(index / chunkShardSize);
       if (!chunkCache.has(shard)) {
-        const data = await countedFetch(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
-        fetches = budget.used;
-        if (!data) break;
+        const data = await loadVersioned(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
+        if (!data) {
+          if (budget.used >= MAX_PAGES_FETCHES) truncation.add("pages_fetch_budget");
+          break;
+        }
         const byIndex = new Map();
         const rows = Array.isArray(data.chunks) ? data.chunks : [];
         for (const row of rows) byIndex.set(row.i, row);
@@ -237,15 +680,42 @@ async function callTool(env, name, args) {
       const row = chunkCache.get(shard).get(index);
       if (!row) continue;
       const count = perLaw.get(row.law_id) || 0;
-      if (count >= MAX_RESULTS_PER_LAW) continue;
+      if (count >= MAX_RESULTS_PER_LAW) {
+        perLawSkipped += 1;
+        continue;
+      }
       perLaw.set(row.law_id, count + 1);
       results.push({
-        law_id: row.law_id, title: row.title, label: row.label, heading: row.heading || "",
-        kind: row.kind || "", snippet: row.snippet || "", source_url: row.source_url || "",
+        law_id: row.law_id,
+        title: row.title,
+        label: row.label,
+        heading: row.heading || "",
+        kind: row.kind || "",
+        snippet: row.snippet || "",
+        source_url: row.source_url || "",
         score: Math.round((scores.get(index) || 0) * 10000) / 10000,
       });
     }
-    return textResult(JSON.stringify({ query, count: results.length, pages_fetches: fetches, candidates: rankedIndexes.length, results }, null, 2));
+    if (perLawSkipped > 0 && results.length < limit) truncation.add("max_results_per_law");
+    const truncationReasons = [...truncation];
+    return textResult(
+      JSON.stringify(
+        {
+          query,
+          data_version: dataVersion,
+          count: results.length,
+          limit,
+          pages_fetches: budget.used,
+          candidates: rankedIndexes.length,
+          walked,
+          truncated: truncationReasons.length > 0,
+          truncation_reasons: truncationReasons,
+          results,
+        },
+        null,
+        2
+      )
+    );
   }
   throw invalidParams(`Unknown tool: ${name}`);
 }
@@ -253,12 +723,14 @@ async function callTool(env, name, args) {
 const TOOLS = [
   {
     name: "reiki_status",
-    description: "Return the published static API meta and health: generation time, site current date, menu hash, data version, law count and failure count.",
+    description:
+      "Return the published static API meta and health (generation time, site current date, data version, law count, failure count) and whether the body-search index is published.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "search_laws_by_title",
-    description: "Search Higashimatsushima ordinances by title keyword, ordinance number, law ID, or classification fragment. Returns matching laws from the published index.",
+    description:
+      "Search Higashimatsushima ordinances by title keyword, ordinance number, law ID, or classification fragment. Reads the lightweight title index and returns summaries only (id, title, ordinance number, classification, article count, source_url); use get_law for the body.",
     inputSchema: {
       type: "object",
       properties: {
@@ -271,12 +743,14 @@ const TOOLS = [
   },
   {
     name: "search_laws_by_content",
-    description: "Keyword body search over Higashimatsushima ordinances using the bigram TF-IDF index on GitHub Pages. Returns matching chunks with law title, article label, snippet and source_url. Fetches only the needed posting/chunk shards.",
+    description:
+      "Keyword body search over Higashimatsushima ordinances using the bigram TF-IDF index on GitHub Pages. Requires at least 2 searchable characters after normalization. Results are approximate: at most 50 postings per term, 3 chunks per law per term, 40 Pages fetches and 300 ranked candidates per call, so read truncated and truncation_reasons before treating the hit list as complete. Pass law_id to search inside one ordinance only.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Japanese keyword query, e.g. 随意契約 600万円" },
+        query: { type: "string", description: "Japanese keyword query with at least 2 characters, e.g. 随意契約 600万円" },
         limit: { type: "number", description: "Maximum results, 1 to 50. Default 10." },
+        law_id: { type: "string", description: "Optional law ID to restrict the search to one ordinance, e.g. r122RG00000070" },
       },
       required: ["query"],
       additionalProperties: false,
@@ -284,24 +758,64 @@ const TOOLS = [
   },
   {
     name: "get_law",
-    description: "Fetch one ordinance in full: articles, paragraphs, items, supplements, appendix tables and history, by law ID such as r122RG00000002.",
+    description:
+      "Fetch one ordinance in full: articles, paragraphs, items, supplements, appendix tables and history, by law ID such as r122RG00000002. Only the currently published version is available; asof is rejected.",
     inputSchema: {
       type: "object",
-      properties: { law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" } },
+      properties: {
+        law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$ (case insensitive)" },
+        asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
+      },
       required: ["law_id"],
       additionalProperties: false,
     },
   },
   {
     name: "get_article",
-    description: "Fetch one article of an ordinance by its label such as 第1条 or 第2条の2.",
+    description:
+      "Fetch one article of an ordinance by its label such as 第1条 or 第2条の2. Optionally select one paragraph (paragraph=2) and one item (item=2) instead of the whole article.",
     inputSchema: {
       type: "object",
       properties: {
         law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" },
         article_label: { type: "string", description: "Article label such as 第1条" },
+        paragraph: { type: "number", description: "Optional paragraph number such as 2" },
+        item: { type: "number", description: "Optional item number such as 2. Requires paragraph." },
+        asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
       },
       required: ["law_id", "article_label"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_toc",
+    description:
+      "Return the table of contents of one ordinance: article labels and headings with offset/limit pagination, plus supplement and appendix table counts and labels. Use it before get_article or get_unit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" },
+        offset: { type: "number", description: "Article offset, default 0" },
+        limit: { type: "number", description: "Articles per page, 1 to 200. Default 60." },
+        asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
+      },
+      required: ["law_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_unit",
+    description:
+      "Fetch one appendix table or one supplement of an ordinance without loading the whole body: kind=appendix_table (alias beppyo) or supplement (alias suppl), with a 1-based n.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" },
+        kind: { type: "string", description: "appendix_table (beppyo) or supplement (suppl)" },
+        n: { type: "number", description: "1-based unit number" },
+        asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
+      },
+      required: ["law_id", "kind", "n"],
       additionalProperties: false,
     },
   },
@@ -365,7 +879,7 @@ async function handleMcp(request, env) {
           result: {
             protocolVersion: PROTOCOL_VERSION,
             capabilities: { tools: {} },
-            serverInfo: { name: "higashimatsushima-reiki-mcp", version: "0.1.0" },
+            serverInfo: { name: "higashimatsushima-reiki-mcp", version: "0.2.0" },
           },
         });
       } else if (method === "ping") {

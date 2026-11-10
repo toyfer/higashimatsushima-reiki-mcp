@@ -42,17 +42,20 @@ concurrency:
 jobs:
   deploy:
     name: Deploy GitHub Pages
-    runs-on: ubuntu-latest
+    # Pinned runner image (issue #31): the Python 3.12, Node 22 and action
+    # versions below are validated against this image and not against a moving
+    # ubuntu-latest alias.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -65,19 +68,25 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           FULL_BUILD: ${{ inputs.full_build }}
           ALLOW_SAMPLE_OVERWRITE: ${{ inputs.allow_sample_overwrite }}
+          CACHE_BUSTER: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          # Issues #27/#29: fail closed whenever the published state cannot be
-          # established, including manual runs. Only an explicit
+          # Issues #27/#29/#33: fail closed whenever the published state cannot
+          # be established, including manual runs. Only an explicit
           # full_build=true refresh, or an explicit allow_sample_overwrite=true
           # after a successfully parsed health.json, may replace a larger
           # published API with the 5-law sample.
+          #
+          # health.json is requested with a per-run cache buster and a no-cache
+          # request header so a CDN copy from before a full deployment cannot be
+          # mistaken for the current published state.
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FULL_BUILD" = "true" ]; then
             echo "mode=full" >> "$GITHUB_OUTPUT"
             echo "skip_sample=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           health_json=$(mktemp)
-          if ! curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json" -o "$health_json"; then
+          health_url="https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json?run=${CACHE_BUSTER}"
+          if ! curl -fsS -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$health_url" -o "$health_json"; then
             echo "::error::Could not fetch published api/health.json. Refusing to build or deploy so the current published API is preserved. Re-run with full_build=true to rebuild the full API."
             exit 1
           fi
@@ -85,8 +94,9 @@ jobs:
             echo "::error::Published api/health.json was unparsable or law_count was invalid. Refusing to build or deploy so the current published API is preserved. Re-run with full_build=true to rebuild the full API."
             exit 1
           fi
+          published_detail=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(f\"ok={d.get('ok')} expected={d.get('expected_count')} failure={d.get('failure_count')} version={d.get('data_version')}\")" "$health_json")
           published_ok=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('true' if d.get('ok') is True else 'false')" "$health_json")
-          echo "Published law_count: $published_count (ok=$published_ok)"
+          echo "Published law_count: $published_count ($published_detail)"
           echo "published_count=$published_count" >> "$GITHUB_OUTPUT"
           echo "published_ok=$published_ok" >> "$GITHUB_OUTPUT"
           if [ "$published_count" -gt 5 ]; then
@@ -136,17 +146,81 @@ jobs:
         if: steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed != 'true'
         run: echo "Ordinance index did not change. Skipping city-site collection, sample build and deployment."
 
+      - name: Verify search index artifacts
+        if: steps.guard.outputs.mode == 'full' || (steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true')
+        run: |
+          # Issue #42: a Worker deploy that serves search_laws_by_content must not
+          # reach Pages before the bigram index actually exists. Fail here instead
+          # of publishing a site where /api/search/manifest.json would 404.
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          api = pathlib.Path("site/api")
+          search = api / "search"
+          problems = []
+
+          manifest_path = search / "manifest.json"
+          if not manifest_path.exists():
+              print(f"::error::missing {manifest_path}; run the full build so the body search index is published")
+              sys.exit(1)
+
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          health = json.loads((api / "health.json").read_text(encoding="utf-8"))
+
+          for key in ("data_version", "law_count", "chunk_count", "chunk_shard_size", "posting_shards", "files"):
+              if key not in manifest:
+                  problems.append(f"manifest_missing_field:{key}")
+          if manifest.get("data_version") != health.get("data_version"):
+              problems.append(f"manifest_version_mismatch:manifest={manifest.get('data_version')}:health={health.get('data_version')}")
+          if manifest.get("chunk_count") != health.get("search_chunk_count"):
+              problems.append(f"chunk_count_mismatch:manifest={manifest.get('chunk_count')}:health={health.get('search_chunk_count')}")
+          if manifest.get("law_count") != health.get("law_count"):
+              problems.append(f"law_count_mismatch:manifest={manifest.get('law_count')}:health={health.get('law_count')}")
+
+          files = manifest.get("files") or {}
+          expected = list(files.get("chunks") or []) + list(files.get("postings") or [])
+          if not expected:
+              problems.append("manifest_files_empty")
+          for name in expected:
+              if not (search / name).exists():
+                  problems.append(f"missing_shard:{name}")
+
+          for name in expected:
+              path = search / name
+              if not path.exists():
+                  continue
+              shard = json.loads(path.read_text(encoding="utf-8"))
+              if shard.get("data_version") != manifest.get("data_version"):
+                  problems.append(f"shard_version_mismatch:{name}")
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+
+          print(
+              "search index ok: version={} laws={} chunks={} shards={}".format(
+                  manifest.get("data_version"),
+                  manifest.get("law_count"),
+                  manifest.get("chunk_count"),
+                  len(expected),
+              )
+          )
+          PY
+
       - name: Set up GitHub Pages
         if: steps.guard.outputs.mode == 'full' || (steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true')
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload site artifact
         if: steps.guard.outputs.mode == 'full' || (steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true')
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
       - name: Deploy to GitHub Pages
         if: steps.guard.outputs.mode == 'full' || (steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true')
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

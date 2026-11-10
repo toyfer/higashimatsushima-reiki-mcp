@@ -30,9 +30,25 @@ After a full build and Pages deploy, the public endpoints are:
 | `api/search/manifest.json` | Keyword body-search index manifest: `bigram-tfidf`, counts and shard files |
 | `api/search/chunks-*.json` | Body-search chunks with title, article label, snippet and `source_url` |
 | `api/search/postings-*.json` | Bigram TF-IDF postings sharded by term hash |
-| `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables and history |
+| `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables, history, plus `content_current_date` and `data_version` |
 
 Example law IDs look like `r122RG00000002`.
+
+### Body search index
+
+`api/search/manifest.json` describes a bigram TF-IDF index built at Pages build time, so the Worker never scores a corpus at request time:
+
+| Field | Meaning |
+|---|---|
+| `data_version` | Version of the build that produced every posting and chunk shard |
+| `chunk_count` / `chunk_shard_size` | Chunks (`chunks-NNN.json`, 500 per shard) |
+| `posting_shards` | Number of posting files, sharded by a hash of the term |
+| `max_postings_per_term` | 50 |
+| `max_postings_per_law_per_term` | 3 |
+
+Search is approximate. Within one call the Worker spends at most 40 Pages fetches and 300 ranked candidates, and the index itself truncates each term to 50 postings. Responses report `truncated` and `truncation_reasons` (`pages_fetch_budget`, `candidate_scan_limit`, `max_results_per_law`) so a caller can distinguish "no such term" from "the caps were reached".
+
+Queries need at least two searchable characters after NFKC normalisation, because the index stores bigrams only. Passing a `law_id` to the Worker restricts the search to that ordinance by reading only its JSON, so results never include other ordinances.
 
 ## Workflows
 
@@ -60,6 +76,8 @@ Manual runs expose:
 
 Do not run full builds repeatedly against the city site during development.
 
+A full build regenerates every ordinance body and the whole search index, so it also changes `data_version`. Run it after parser or index changes, then let the Worker pick the new version up.
+
 ## Local commands
 
 ```bash
@@ -83,8 +101,29 @@ python3 scripts/measure_search_index.py
 | `scripts/measure_search_index.py` | Local / CI measurement of search index build cost and size |
 | `data/status/latest.json` | Last known menu hash, site current date and ordinance URL list |
 | `site/index.html` | Human-readable entry page for the static API |
+| `worker/src/index.js` | Stateless MCP Worker over the published static API |
+| `worker/test/index.test.mjs` | Worker tests with mocked Pages responses |
+| `.github/workflows/deploy-worker.yml` | Worker deploy, published-index precondition, endpoint verification |
 | `tests/` | Network-free parser and checker tests |
 
-## Next step: Cloudflare Worker
+## Deploy order and verification
 
-After GitHub Pages serves a sample API, add the Worker under `worker/` and deploy it with Wrangler. The Worker should fetch the Pages JSON, cache it, and expose MCP tools such as status, title search, ordinance fetch and article fetch.
+The Worker is already implemented under `worker/` and exposes seven MCP tools: `reiki_status`, `search_laws_by_title`, `search_laws_by_content`, `get_law`, `get_article`, `get_toc` and `get_unit`. Tool behaviour, limits and arguments are documented in `worker/README.md`.
+
+Publish Pages before the Worker. A Worker that points at a Pages site without a search index answers `search_laws_by_content` with a Pages 404, which is why `deploy-worker.yml` checks the published index before `wrangler deploy` and then calls the search tool from the deployed endpoint.
+
+```bash
+# 1. publish or refresh the index (full build)
+#    Pages workflow -> workflow_dispatch
+#    full_build=true, allow_sample_overwrite=false, delay_seconds=0.35
+# 2. confirm the published index
+curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/search/manifest.json"
+curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json"
+# 3. deploy the Worker (push to worker/** or run the Deploy Worker workflow)
+# 4. confirm the deployed endpoint
+curl -fsS https://higashimatsushima-reiki-mcp.toys-master.dev/health
+```
+
+The Pages workflow also verifies the built `site/api/search` before upload: a missing manifest, a missing shard, or a shard whose `data_version` differs from `health.json` fails the job instead of deploying a half-updated index.
+
+Only the currently published version is served. Historical snapshots are a separate design problem: responses carry `content_current_date` and `data_version`, and the Worker rejects `asof` rather than returning today's text as if it were historical.

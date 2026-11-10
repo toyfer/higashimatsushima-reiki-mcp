@@ -351,5 +351,73 @@ class BlockingWarningBuildTest(unittest.TestCase):
 
 
 
+class PublishedMetadataTest(unittest.TestCase):
+    def build(self):
+        import build_static_api as builder
+
+        original_fetch = builder.fetch_text
+        original_argv = sys.argv
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        status = root / "status.json"
+        status.write_text(
+            json.dumps(
+                {
+                    "laws": [{"id": "r100RG00000001", "url": "https://example.invalid/1", "title": "条例A"}],
+                    "menu_sha256": "m",
+                    "current_date": "令和8年6月26日",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def fake_fetch(url, timeout=30):
+            if "reiki_menu" in url or url == builder.MENU_URL:
+                return "<html>内容現在 令和8年6月26日</html>", "menuhash"
+            return (
+                "<html><head><title>条例A</title></head><body>"
+                '<div id="primary"><p>○条例A</p><p>令和7年4月1日</p><p>条例第1号</p>'
+                "<p>(趣旨)</p><p>第1条　本文。</p></div><!-- /本文 -->"
+                '<div id="secondary"><h2 class="heading-lv2A">条例A</h2></div>'
+                '<span class="taikei-item">第1編 総規</span></div></body></html>'
+            ), "h"
+
+        builder.fetch_text = fake_fetch  # type: ignore[assignment]
+        sys.argv = [
+            "build_static_api.py",
+            "--status",
+            str(status),
+            "--out",
+            str(root / "site"),
+            "--delay",
+            "0",
+        ]
+        try:
+            code = builder.main()
+        finally:
+            builder.fetch_text = original_fetch  # type: ignore[assignment]
+            sys.argv = original_argv
+        self.assertEqual(code, 0)
+        return root / "site" / "api"
+
+    def test_law_json_carries_the_published_data_version(self) -> None:
+        api = self.build()
+        health = json.loads((api / "health.json").read_text(encoding="utf-8"))
+        law = json.loads((api / "laws" / "r100RG00000001.json").read_text(encoding="utf-8"))
+        self.assertEqual(law["data_version"], health["data_version"])
+        self.assertEqual(law["content_current_date"], "令和8年6月26日")
+
+    def test_title_index_carries_search_summary_fields(self) -> None:
+        api = self.build()
+        title_index = json.loads((api / "search" / "title-index.json").read_text(encoding="utf-8"))
+        entry = title_index["laws"][0]
+        for field in ("id", "title", "ordinance_number", "classification", "enacted_date", "article_count", "source_url"):
+            self.assertIn(field, entry)
+        self.assertEqual(entry["classification"], "第1編 総規")
+        self.assertEqual(entry["article_count"], 1)
+        self.assertNotIn("body_text", entry)
+
+
 if __name__ == "__main__":
     unittest.main()

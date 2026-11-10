@@ -165,9 +165,67 @@ BRANCHED = """
 <p class="datenumber-area mt04">令和7年4月1日　条例第99号</p>
 <span class="taikei-item">第1編 総規/第1章 市制施行</span></div>
 </div>
-<table><tr><td>◆</td><td>令和7年4月1日</td><td>条例第99号</td></tr></table>
+<div id="shoshi-inf" class="tab-body"><div class="shoshi">
+<div><span class="enkaku-title">沿革情報</span></div>
+<table><tr><td class="seitei-icon">◆</td><td>令和7年4月1日</td><td>条例第99号</td></tr></table>
+</div></div><!-- /書誌情報 -->
 </body></html>
 """
+
+# The next article's heading must not be appended to the previous article (#40).
+NEXT_HEADING = """
+<html><head><title>東松島市休日検証条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><p><span>（市の休日）</span></p></div></div>
+<div><div class="eline"><p><span>第1条</span>　<span>市の休日を定める。</span></p></div></div>
+<div><div class="eline"><p><span>（期限の特例）</span></p></div></div>
+<div><div class="eline"><p><span>第2条</span>　<span>期限の特例を定める。</span></p></div></div>
+</div></div></div><!-- /本文 -->
+<div id="shoshi-inf" class="tab-body"><div class="shoshi">
+<div><span class="enkaku-title">沿革情報</span></div>
+<table><tr><td class="seitei-icon">◆</td><td>平成17年4月1日</td><td>条例第2号</td></tr></table>
+</div></div><!-- /書誌情報 -->
+</body></html>
+"""
+
+# 別表(第2条関係) must be an appendix table, not part of the last supplement (#38).
+RELATION_APPENDIX = """
+<html><head><title>東松島市別表検証条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><p><span>（趣旨）</span></p></div></div>
+<div><div class="eline"><p><span>第1条</span>　<span>手数料を徴収する。</span></p></div></div>
+<div><div class="eline"><p><span><span class="word-space">附</span>則</span></p></div></div>
+<div><div class="eline"><p><span>この条例は、公布の日から施行する。</span></p></div></div>
+<div><div class="eline"><div class="num"><p><span>別表</span><span>(第2条関係)</span></p></div></div></div>
+<div><div class="eline"><p><span>事務 名称 金額</span></p></div></div>
+<div><div class="eline"><p><span>納税証明 手数料 300円</span></p></div></div>
+</div></div></div><!-- /本文 -->
+<div id="shoshi-inf" class="tab-body"><div class="shoshi">
+<div><span class="enkaku-title">沿革情報</span></div>
+<table>
+<tr><td class="seitei-icon">◆</td><td>平成17年4月1日</td><td>条例第51号</td></tr>
+<tr><td class="seitei-icon">◇</td><td>令和6年3月1日</td><td>条例第6号</td></tr>
+</table>
+</div></div><!-- /書誌情報 -->
+</body></html>
+"""
+
+# Appendix rows shaped like history rows must never reach history (#36).
+HISTORY_TABLE_WITH_APPENDIX_SHAPE = """
+<html><head><title>東松島市沿革検証条例</title></head><body>
+<div id="primary" class="joubun showhistory"><div id="primaryInner"><div id="primaryInner2">
+<div><div class="eline"><p><span>第1条</span>　<span>本文である。</span></p></div></div>
+<div><div class="eline"><p><span>別表第1</span></p></div></div>
+<div><div class="eline"><p><span>1 手数料の名称</span></p></div></div>
+</div></div></div><!-- /本文 -->
+<div id="shoshi-inf" class="tab-body"><div class="shoshi">
+<div><span class="enkaku-title">沿革情報</span></div>
+<table><tr><td class="seitei-icon">◆</td><td>平成17年4月1日</td><td>条例第51号</td></tr></table>
+<table><tr><td>1</td><td>手数料の名称</td></tr><tr><td>2</td><td>金額</td></tr></table>
+</div></div><!-- /書誌情報 -->
+</body></html>
+"""
+
 
 # Article whose item lines appear before any structured paragraph exists, so the
 # text/structured item counts diverge and the blocking warning must fire (#21).
@@ -262,6 +320,41 @@ class ParseWarningTest(unittest.TestCase):
         self.assertEqual(data["history"], [{"date": "令和7年4月1日", "number": "条例第99号"}])
         self.assertEqual(data["parse_warnings"], [])
 
+
+
+class TextIntegrityTest(unittest.TestCase):
+    def test_next_article_heading_is_not_appended_to_previous_text(self) -> None:
+        data = parse_honbun(NEXT_HEADING, law_id="r122RG00000002", source_url="https://example.invalid/next.html")
+        first, second = data["articles"][0], data["articles"][1]
+        self.assertEqual(first["heading"], "（市の休日）")
+        self.assertNotIn("期限の特例", first["text"])
+        self.assertEqual(second["heading"], "（期限の特例）")
+        self.assertIn("期限の特例を定める", second["text"])
+
+    def test_relation_style_appendix_is_parsed_and_not_merged_into_supplement(self) -> None:
+        data = parse_honbun(RELATION_APPENDIX, law_id="r122RG00000070", source_url="https://example.invalid/rel.html")
+        self.assertEqual(len(data["appendix_tables"]), 1)
+        self.assertTrue(data["appendix_tables"][0].startswith("別表(第2条関係)"))
+        self.assertIn("納税証明", data["appendix_tables"][0])
+        self.assertEqual(len(data["supplements"]), 1)
+        self.assertNotIn("納税証明", data["supplements"][0])
+        self.assertNotIn("別表", data["supplements"][0])
+        self.assertEqual(data["parse_warnings"], [])
+
+    def test_history_ignores_appendix_shaped_rows(self) -> None:
+        data = parse_honbun(HISTORY_TABLE_WITH_APPENDIX_SHAPE, law_id="r122RG00000070", source_url="https://example.invalid/hist.html")
+        self.assertEqual(data["history"], [{"date": "平成17年4月1日", "number": "条例第51号"}])
+
+    def test_history_is_empty_with_warning_when_no_history_table(self) -> None:
+        html = """
+<html><head><title>東松島市沿革なし条例</title></head><body>
+<div id="primary" class="joubun"><div><p><span>第1条</span>　<span>本文である。</span></p></div></div><!-- /本文 -->
+<table><tr><td>1</td><td>別表の行</td></tr></table>
+</body></html>
+"""
+        data = parse_honbun(html, law_id="r122RG00000070", source_url="https://example.invalid/nohist.html")
+        self.assertEqual(data["history"], [])
+        self.assertEqual(data["appendix_tables"], [])
 
 
 if __name__ == "__main__":
