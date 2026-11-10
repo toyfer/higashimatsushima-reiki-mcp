@@ -967,6 +967,8 @@ async function callTool(env, name, args) {
       (reason) => reason === "pages_fetch_budget" || reason === "candidate_scan_limit"
     );
     const indexCaps = {
+      posting_terms: manifest.posting_terms ?? null,
+      posting_entries: manifest.posting_entries ?? null,
       max_postings_per_term: manifest.max_postings_per_term ?? null,
       max_postings_per_law_per_term: manifest.max_postings_per_law_per_term ?? null,
       pages_fetch_limit: MAX_PAGES_FETCHES,

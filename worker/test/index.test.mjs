@@ -985,5 +985,7 @@ test("search reports counters and index caps for completeness judgement", async 
     assert.equal(payload.index_caps.pages_fetch_limit, 46);
     assert.equal(payload.index_caps.posting_shard_limit, 10);
     assert.equal(payload.index_caps.candidate_scan_limit, 300);
+    assert.ok("posting_terms" in payload.index_caps);
+    assert.ok("posting_entries" in payload.index_caps);
   } finally { restore(); }
 });

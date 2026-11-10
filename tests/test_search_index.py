@@ -131,6 +131,8 @@ class PostingBuildTest(unittest.TestCase):
         self.assertEqual(manifest["chunk_shard_size"], search_index.CHUNK_SHARD_SIZE)
         self.assertEqual(manifest["length_norm_alpha"], search_index.LENGTH_NORM_ALPHA)
         self.assertEqual(manifest["appendix_boost"], search_index.APPENDIX_BOOST)
+        self.assertGreater(manifest["posting_terms"], 0)
+        self.assertGreaterEqual(manifest["posting_entries"], manifest["posting_terms"])
         self.assertEqual(search_index.CHUNK_SHARD_SIZE, 500)
 
     def test_manifest_is_keyword_only(self):
