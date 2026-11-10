@@ -32,7 +32,9 @@ GET /api/laws/r122RG00000002.json
 GET /api/search/manifest.json</pre>
 <h2>本文検索</h2>
 <p><code>api/search/manifest.json</code> はビルド時に生成した bigram TF-IDF 索引の説明です。<code>data_version</code> は同じビルドで作られた postings と chunks の版を表すので、検索前に必ず照合してください。版が一致しない postings と chunks を組み合わせると、chunk 番号が別の条例を指します。</p>
-<p>検索は近似です。1 term あたり最大 50 posting、1 条例・1 term あたり最大 3 posting に削られ、Worker 側も 1 回の呼び出しで最大 40 fetch・300 候補で打ち切ります。打ち切りが起きた場合は <code>truncated</code> と <code>truncation_reasons</code> が返ります。0 件と打ち切りの区別に使ってください。</p>
+<p>検索は2段階です。bigram の posting で候補を作り、その後に chunk の全文（chunk shard の <code>text</code>）で語句の連続一致を確認します。<code>600点</code> と <code>500万円</code> を含む chunk は <code>600万円</code> の4つの bigram をすべて持ちますが、連続した文字列ではないため除外されます。bigram だけの一致を残す場合は <code>exact=false</code> を指定し、結果の <code>match_type</code> が <code>approximate</code> になります。</p>
+<p>複数語の扱いは <code>operator</code>（AND/OR）と <code>scope</code>（chunk/law）で指定します。chunk は同一 chunk 内に全語が必要、law は同一条例内のどこかに各語があれば成立し、<code>matches[]</code> に語ごとの根拠 chunk が付きます。結果には <code>snippet</code> と <code>highlights</code>、<code>matched_terms</code>、<code>unmatched_terms</code> が入ります。</p>
+<p>索引側は 1 term あたり最大 50 posting、1 条例・1 term あたり最大 3 posting、Worker 側は 1 回の呼び出しで最大 40 fetch・300 候補で打ち切ります。応答の <code>completeness</code>（complete/partial）と <code>filtered_out_exact</code> / <code>filtered_out_no_term</code> / <code>skipped_per_law</code> / <code>index_caps</code> で、語が無いのか上限に達したのかを区別してください。</p>
 <p>日本語は 2 文字以上のクエリが必要です（索引が bigram のみのため、<code>税</code> のような 1 文字は対象外）。</p>
 <h2>版の扱い</h2>
 <p>公開しているのは現在版のみです。各条例 JSON には <code>content_current_date</code> と <code>data_version</code> が入ります。過去時点の条文は提供しないため、日付指定の取得は未対応として明示的に拒否します。</p>

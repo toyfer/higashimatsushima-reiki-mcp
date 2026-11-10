@@ -101,6 +101,10 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
                 "kind": kind,
                 "source_url": source_url,
                 "snippet": collapsed[:SNIPPET_CHARS],
+                # Full body text, kept so the Worker can verify a phrase and
+                # build a query-aware window instead of trusting bigram
+                # coincidence alone (issues #49, #52).
+                "text": collapsed,
                 "search_text": _collapse(" ".join([title, label, heading, collapsed])),
             }
         )
@@ -219,6 +223,7 @@ class SearchIndexBuilder:
                         "kind": chunk.get("kind", ""),
                         "source_url": chunk.get("source_url", ""),
                         "snippet": chunk["snippet"],
+                        "text": chunk.get("text", chunk["snippet"]),
                     }
                 )
             chunk_files[f"chunks-{start // CHUNK_SHARD_SIZE:03d}.json"] = {"data_version": data_version, "chunks": rows}

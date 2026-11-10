@@ -155,6 +155,76 @@ function searchBigrams(value) {
   return grams;
 }
 
+
+const SNIPPET_WINDOW = 220;
+
+function parseSearchTerms(query) {
+  return String(query || "")
+    .split(/\s+/)
+    .map((raw) => raw.trim())
+    .filter(Boolean)
+    .map((raw) => ({ raw, normalized: searchableText(raw), bigrams: [...new Set(searchBigrams(raw))] }))
+    .filter((term) => term.normalized.length > 0);
+}
+
+function normalizeWithMap(text) {
+  const original = String(text || "");
+  let normalized = "";
+  const map = [];
+  for (let index = 0; index < original.length; index += 1) {
+    const folded = original[index].normalize("NFKC").toLowerCase();
+    for (const char of folded) {
+      if (/[\p{L}\p{N}]/u.test(char)) {
+        normalized += char;
+        map.push(index);
+      }
+    }
+  }
+  return { original, normalized, map };
+}
+
+function firstPhraseMatch(haystack, termNormalized) {
+  if (!haystack || !termNormalized) return { found: false, start: -1, end: -1 };
+  const start = haystack.normalized.indexOf(termNormalized);
+  if (start < 0) return { found: false, start: -1, end: -1 };
+  return { found: true, start, end: start + termNormalized.length };
+}
+
+function bestWindowStart(originals, size) {
+  let best = originals[0];
+  let bestDistinct = -1;
+  for (const candidate of originals) {
+    const from = candidate - 40;
+    const to = from + size;
+    const distinct = new Set(originals.filter((value) => value >= from && value < to)).size;
+    if (distinct > bestDistinct) {
+      bestDistinct = distinct;
+      best = candidate;
+    }
+  }
+  return Math.max(0, best - 40);
+}
+
+function buildSearchWindow(haystack, termMatches, size) {
+  const original = haystack && haystack.original ? haystack.original : "";
+  const matches = (termMatches || []).filter((match) => match && match.startOrig >= 0);
+  if (!original) return { snippet: "", highlights: [] };
+  const start = matches.length ? bestWindowStart(matches.map((match) => match.startOrig), size) : 0;
+  const end = Math.min(original.length, start + size);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < original.length ? "…" : "";
+  const snippet = `${prefix}${original.slice(start, end)}${suffix}`;
+  const highlights = matches
+    .filter((match) => match.startOrig >= start && match.startOrig < end)
+    .map((match) => ({
+      term: match.term,
+      start: match.startOrig - start + prefix.length,
+      end: Math.min(end, Math.max(match.endOrig, match.startOrig + 1)) - start + prefix.length,
+      match_type: match.approximate ? "approximate" : "exact",
+    }));
+  return { snippet, highlights };
+}
+
 function invalidParams(message) {
   return new ProtocolError(-32602, message);
 }
@@ -534,15 +604,23 @@ async function callTool(env, name, args) {
   if (name === "search_laws_by_content") {
     const query = String(input.query || "").trim();
     if (!query) throw invalidParams("query is required");
-    const grams = [...new Set(searchBigrams(query))];
     if (searchableText(query).length < MIN_QUERY_CHARS) {
       throw invalidParams(
         `query must contain at least ${MIN_QUERY_CHARS} searchable characters after normalization, because the body index stores bigrams only. Use a longer phrase such as 税金 instead of 税.`
       );
     }
-    if (!grams.length) throw invalidParams("query must contain searchable characters");
+    const terms = parseSearchTerms(query);
+    if (!terms.length) throw invalidParams("query must contain searchable characters");
     const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
-    const scopedLawId = input.law_id === undefined || input.law_id === null || String(input.law_id).trim() === "" ? "" : requireCanonicalLawId(input.law_id);
+    const operator = String(input.operator || "AND").toUpperCase() === "OR" ? "OR" : "AND";
+    const rawScope = String(input.scope || "chunk").toLowerCase();
+    const scope = rawScope === "law" ? "law" : "chunk";
+    const groupBy = scope === "law" ? "law" : String(input.group_by || "chunk").toLowerCase() === "law" ? "law" : "chunk";
+    const exact = input.exact === undefined ? true : input.exact !== false && String(input.exact) !== "false";
+    const scopedLawId =
+      input.law_id === undefined || input.law_id === null || String(input.law_id).trim() === ""
+        ? ""
+        : requireCanonicalLawId(input.law_id);
 
     if (scopedLawId) {
       const law = await fetchPagesJson(env, `/api/laws/${scopedLawId}.json`, { allowNotFound: true });
@@ -556,6 +634,7 @@ async function callTool(env, name, args) {
               reason: "not_found",
               count: 0,
               pages_fetches: 1,
+              completeness: "complete",
               truncated: false,
               truncation_reasons: [],
               results: [],
@@ -566,34 +645,66 @@ async function callTool(env, name, args) {
         );
       }
       const units = lawUnits(law);
-      const scored = units
-        .map((unit) => ({ unit, score: scoreUnit(`${unit.label} ${unit.heading} ${unit.text}`, grams) }))
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) => b.score - a.score || a.unit.label.localeCompare(b.unit.label));
+      const examined = units.map((unit) => {
+        const haystack = normalizeWithMap(`${unit.label} ${unit.heading} ${unit.text}`);
+        const matches = terms
+          .map((term) => ({ term: term.raw, ...firstPhraseMatch(haystack, term.normalized) }))
+          .filter((entry) => entry.found);
+        return { unit, haystack, matches };
+      });
+      const qualifies = examined.filter((entry) =>
+        operator === "AND" ? entry.matches.length === terms.length : entry.matches.length > 0
+      );
+      const filteredOutExact = examined.length - qualifies.length;
+      const scored = qualifies
+        .map((entry) => ({ entry, score: scoreUnit(entry.unit.text, terms.flatMap((term) => term.bigrams)) }))
+        .sort((a, b) => b.score - a.score || a.entry.unit.label.localeCompare(b.entry.unit.label));
       const truncated = scored.length > limit;
-      const results = scored.slice(0, limit).map((entry) => ({
-        law_id: law.id,
-        title: law.title,
-        label: entry.unit.label,
-        heading: entry.unit.heading || "",
-        kind: entry.unit.kind,
-        unit_index: entry.unit.unitIndex,
-        unit_id: unitId(law.id, entry.unit),
-        snippet: snippetFor(entry.unit.text, grams),
-        source_url: law.source_url || "",
-        score: entry.score,
-      }));
+      const results = scored.slice(0, limit).map(({ entry, score }) => {
+        const window = buildSearchWindow(
+          entry.haystack,
+          entry.matches.map((match) => ({
+            term: match.term,
+            startOrig: match.found ? entry.haystack.map[match.start] : -1,
+            endOrig: match.found ? (entry.haystack.map[match.end - 1] ?? -1) + 1 : -1,
+            approximate: Boolean(match.approximate),
+          })),
+          SNIPPET_WINDOW
+        );
+        return {
+          law_id: law.id,
+          title: law.title,
+          label: entry.unit.label,
+          heading: entry.unit.heading || "",
+          kind: entry.unit.kind,
+          unit_index: entry.unit.unitIndex,
+          unit_id: unitId(law.id, entry.unit),
+          snippet: window.snippet,
+          highlights: window.highlights,
+          source_url: law.source_url || "",
+          score,
+          match_type: exact ? "exact" : "approximate",
+          matched_terms: entry.matches.map((match) => match.term),
+          unmatched_terms: terms.map((term) => term.raw).filter((raw) => !entry.matches.some((match) => match.term === raw)),
+        };
+      });
       return textResult(
         JSON.stringify(
           {
             query,
             law_id: scopedLawId,
+            operator,
+            scope: "law",
+            exact,
             data_version: law.data_version || "",
             content_current_date: law.content_current_date || "",
             count: results.length,
             limit,
             pages_fetches: 1,
-            candidates: scored.length,
+            candidates: examined.length,
+            candidates_examined: examined.length,
+            filtered_out_exact: filteredOutExact,
+            completeness: truncated ? "partial" : "complete",
             truncated,
             truncation_reasons: truncated ? ["result_limit"] : [],
             results,
@@ -605,7 +716,7 @@ async function callTool(env, name, args) {
     }
 
     const budget = { used: 0 };
-    const truncation = new Set();
+    const reasons = new Set();
     const manifest = await loadSearchManifest(env);
     budget.used += 1;
     if (!manifest) {
@@ -617,7 +728,7 @@ async function callTool(env, name, args) {
     const chunkShardSize = Number(manifest.chunk_shard_size) || CHUNK_SHARD_SIZE;
     const countedFetch = async (path, cacheBust) => {
       if (budget.used >= MAX_PAGES_FETCHES) {
-        truncation.add("pages_fetch_budget");
+        reasons.add("pages_fetch_budget");
         return null;
       }
       budget.used += 1;
@@ -633,83 +744,212 @@ async function callTool(env, name, args) {
         `search index version mismatch: ${path} reports data_version=${data && data.data_version}, manifest expects ${dataVersion}. Re-run the Pages workflow with full_build=true so every posting and chunk shard is republished, then retry.`
       );
     };
-    const shardIds = [...new Set(grams.map((gram) => fnv1a32(gram) % POSTING_SHARD_COUNT))].sort((a, b) => a - b);
+
+    const gramShards = new Map();
+    for (const term of terms) {
+      for (const gram of term.bigrams) {
+        if (!gramShards.has(gram)) gramShards.set(gram, fnv1a32(gram) % POSTING_SHARD_COUNT);
+      }
+    }
+    const shardIds = [...new Set(gramShards.values())].sort((a, b) => a - b);
     const scores = new Map();
+    const gramChunks = new Map();
     for (const shard of shardIds) {
       if (budget.used >= MAX_PAGES_FETCHES) {
-        truncation.add("pages_fetch_budget");
+        reasons.add("pages_fetch_budget");
         break;
       }
       const data = await loadVersioned(`/api/search/postings-${String(shard).padStart(2, "0")}.json`);
       if (!data) break;
-      const terms = data && typeof data === "object" ? data.terms || {} : {};
-      for (const gram of grams) {
-        const entries = Array.isArray(terms[gram]) ? terms[gram] : [];
+      const postings = data && typeof data === "object" ? data.terms || {} : {};
+      for (const [gram, shardId] of gramShards) {
+        if (shardId !== shard) continue;
+        const entries = Array.isArray(postings[gram]) ? postings[gram] : [];
+        const chunks = new Set();
         for (const entry of entries) {
           if (!Array.isArray(entry) || entry.length < 2) continue;
           const [index, score] = entry;
           scores.set(index, (scores.get(index) || 0) + Number(score || 0));
+          chunks.add(index);
         }
+        gramChunks.set(gram, chunks);
       }
     }
     const rankedIndexes = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([index]) => index);
     const chunkCache = new Map();
-    const perLaw = new Map();
     const results = [];
+    const lawGroups = new Map();
+    const perLaw = new Map();
     let walked = 0;
-    let perLawSkipped = 0;
-    for (const index of rankedIndexes) {
-      if (results.length >= limit) break;
-      if (walked >= MAX_CANDIDATES_WALKED) {
-        truncation.add("candidate_scan_limit");
-        break;
-      }
-      walked += 1;
+    let filteredOutExact = 0;
+    let filteredOutNoTerm = 0;
+    let skippedPerLaw = 0;
+
+    const loadChunkRow = async (index) => {
       const shard = Math.floor(index / chunkShardSize);
       if (!chunkCache.has(shard)) {
         const data = await loadVersioned(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
-        if (!data) {
-          if (budget.used >= MAX_PAGES_FETCHES) truncation.add("pages_fetch_budget");
-          break;
-        }
+        if (!data) return null;
         const byIndex = new Map();
-        const rows = Array.isArray(data.chunks) ? data.chunks : [];
-        for (const row of rows) byIndex.set(row.i, row);
+        for (const row of Array.isArray(data.chunks) ? data.chunks : []) byIndex.set(row.i, row);
         chunkCache.set(shard, byIndex);
       }
-      const row = chunkCache.get(shard).get(index);
-      if (!row) continue;
+      return chunkCache.get(shard).get(index) || null;
+    };
+
+    for (const index of rankedIndexes) {
+      if (results.length >= limit && (groupBy === "chunk" || scope === "chunk")) break;
+      if (walked >= MAX_CANDIDATES_WALKED) {
+        reasons.add("candidate_scan_limit");
+        break;
+      }
+      walked += 1;
+      const row = await loadChunkRow(index);
+      if (!row) {
+        if (budget.used >= MAX_PAGES_FETCHES) reasons.add("pages_fetch_budget");
+        break;
+      }
+      const body = String(row.text || row.snippet || "");
+      const haystack = normalizeWithMap(`${row.label || ""} ${row.heading || ""} ${body}`);
+      let verified;
+      if (exact && row.text) {
+        verified = terms.map((term) => ({ raw: term.raw, match: firstPhraseMatch(haystack, term.normalized) }));
+      } else {
+        verified = terms.map((term) => ({
+          raw: term.raw,
+          match: {
+            found: term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index)),
+            approximate: true,
+            positions: [],
+          },
+        }));
+      }
+      const matched = verified.filter((entry) => entry.match.found);
+      // A row can be a candidate (every bigram present) without containing the
+      // phrase, which is exactly the 600点/500万円 trap in issue #52.
+      const bigramComplete = terms.every(
+        (term) => term.bigrams.length > 0 && term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index))
+      );
+      const rejectedByExact = bigramComplete && exact && Boolean(row.text);
+      if (!matched.length) {
+        if (rejectedByExact) filteredOutExact += 1;
+        else filteredOutNoTerm += 1;
+        continue;
+      }
+      // law scope aggregates evidence per law, so the operator is applied after
+      // collecting every term for that law, not per chunk.
+      if (scope === "chunk" && operator === "AND" && matched.length !== terms.length) {
+        if (rejectedByExact) filteredOutExact += 1;
+        else filteredOutNoTerm += 1;
+        continue;
+      }
+      const score = Math.round((scores.get(index) || 0) * 10000) / 10000;
+      const termMatches = matched.map((entry) => ({
+        term: entry.raw,
+        startOrig: entry.match.found && entry.match.start !== undefined ? haystack.map[entry.match.start] : -1,
+        endOrig:
+          entry.match.found && entry.match.end !== undefined ? (haystack.map[entry.match.end - 1] ?? -1) + 1 : -1,
+        approximate: Boolean(entry.match.approximate),
+      }));
+
+      if (scope === "law" || groupBy === "law") {
+        const lawId = row.law_id;
+        if (!lawGroups.has(lawId)) {
+          lawGroups.set(lawId, { law_id: lawId, title: row.title, score, matches: new Map(), best: row });
+        }
+        const group = lawGroups.get(lawId);
+        group.score = Math.max(group.score, score);
+        for (const entry of matched) {
+          if (!group.matches.has(entry.raw)) {
+            const window = buildSearchWindow(haystack, termMatches.filter((match) => match.term === entry.raw), SNIPPET_WINDOW);
+            group.matches.set(entry.raw, {
+              term: entry.raw,
+              label: row.label,
+              heading: row.heading || "",
+              kind: row.kind || "",
+              unit_id: `${lawId}#${row.kind || "unit"}-${row.label}`,
+              snippet: window.snippet,
+              highlights: window.highlights,
+              match_type: termMatches.find((match) => match.term === entry.raw)?.approximate ? "approximate" : "exact",
+            });
+          }
+        }
+        const groupTerms = [...group.matches.keys()];
+        const satisfied = operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : groupTerms.length > 0;
+        if (satisfied && !results.some((item) => item.law_id === lawId)) {
+          const window = buildSearchWindow(haystack, termMatches.slice(0, 1), SNIPPET_WINDOW);
+          results.push({
+            law_id: lawId,
+            title: row.title,
+            label: row.label,
+            heading: row.heading || "",
+            kind: row.kind || "",
+            source_url: row.source_url || "",
+            score: group.score,
+            snippet: window.snippet,
+            highlights: window.highlights,
+            match_type: exact && row.text ? "exact" : "approximate",
+            matched_terms: groupTerms,
+            unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
+            matches: [...group.matches.values()],
+          });
+        }
+        if (results.length >= limit) break;
+        continue;
+      }
+
       const count = perLaw.get(row.law_id) || 0;
       if (count >= MAX_RESULTS_PER_LAW) {
-        perLawSkipped += 1;
+        skippedPerLaw += 1;
         continue;
       }
       perLaw.set(row.law_id, count + 1);
+      const window = buildSearchWindow(haystack, termMatches, SNIPPET_WINDOW);
       results.push({
         law_id: row.law_id,
         title: row.title,
         label: row.label,
         heading: row.heading || "",
         kind: row.kind || "",
-        snippet: row.snippet || "",
         source_url: row.source_url || "",
-        score: Math.round((scores.get(index) || 0) * 10000) / 10000,
+        score,
+        snippet: window.snippet,
+        highlights: window.highlights,
+        match_type: exact && row.text ? "exact" : "approximate",
+        matched_terms: matched.map((entry) => entry.raw),
+        unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });
     }
-    if (perLawSkipped > 0 && results.length < limit) truncation.add("max_results_per_law");
-    const truncationReasons = [...truncation];
+    if (skippedPerLaw > 0 && results.length < limit) reasons.add("max_results_per_law");
+    const truncationReasons = [...reasons];
+    const indexCaps = {
+      max_postings_per_term: manifest.max_postings_per_term ?? null,
+      max_postings_per_law_per_term: manifest.max_postings_per_law_per_term ?? null,
+      pages_fetch_limit: MAX_PAGES_FETCHES,
+      candidate_scan_limit: MAX_CANDIDATES_WALKED,
+    };
     return textResult(
       JSON.stringify(
         {
           query,
+          terms: terms.map((term) => term.raw),
+          operator,
+          scope,
+          group_by: groupBy,
+          exact,
           data_version: dataVersion,
           count: results.length,
           limit,
           pages_fetches: budget.used,
           candidates: rankedIndexes.length,
-          walked,
+          candidates_examined: walked,
+          filtered_out_no_term: filteredOutNoTerm,
+          filtered_out_exact: filteredOutExact,
+          skipped_per_law: skippedPerLaw,
+          completeness: truncationReasons.length > 0 ? "partial" : "complete",
           truncated: truncationReasons.length > 0,
           truncation_reasons: truncationReasons,
+          index_caps: indexCaps,
           results,
         },
         null,
@@ -744,13 +984,17 @@ const TOOLS = [
   {
     name: "search_laws_by_content",
     description:
-      "Keyword body search over Higashimatsushima ordinances using the bigram TF-IDF index on GitHub Pages. Requires at least 2 searchable characters after normalization. Results are approximate: at most 50 postings per term, 3 chunks per law per term, 40 Pages fetches and 300 ranked candidates per call, so read truncated and truncation_reasons before treating the hit list as complete. Pass law_id to search inside one ordinance only.",
+      "Two-stage body search over Higashimatsushima ordinances: bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text. exact=true (default) keeps only chunks where every query term appears as a contiguous phrase, so digits and units cannot be satisfied by unrelated bigrams. Returns snippet with highlights, match_type, matched/unmatched terms, and completeness counters. Results are bounded: at most 50 postings per term in the index, 3 chunks per law per term, 40 Pages fetches and 300 examined candidates per call. scope=chunk requires all terms in one chunk; scope=law aggregates per ordinance and returns matches[] with the evidence chunk for each term.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Japanese keyword query with at least 2 characters, e.g. 随意契約 600万円" },
+        query: { type: "string", description: "Japanese keyword query with at least 2 characters; space-separated terms, e.g. 随意契約 600万円" },
         limit: { type: "number", description: "Maximum results, 1 to 50. Default 10." },
-        law_id: { type: "string", description: "Optional law ID to restrict the search to one ordinance, e.g. r122RG00000070" },
+        law_id: { type: "string", description: "Restrict the search to one ordinance, e.g. r122RG00000070" },
+        operator: { type: "string", enum: ["AND", "OR"], description: "How multiple terms combine. Default AND." },
+        scope: { type: "string", enum: ["chunk", "law"], description: "chunk: all terms in the same chunk. law: all terms somewhere in the same ordinance. Default chunk." },
+        group_by: { type: "string", enum: ["chunk", "law"], description: "Collapse results per ordinance. Default chunk (law when scope=law)." },
+        exact: { type: "boolean", description: "Verify each term as a contiguous phrase in the chunk text. Default true; false keeps bigram-only matches labelled approximate." },
       },
       required: ["query"],
       additionalProperties: false,
