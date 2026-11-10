@@ -15,7 +15,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from daily_check import collect_from_taikei, extract_current_date, fetch_text
-from parse_honbun import parse_honbun
+from parse_honbun import HISTORY_DATE_RE, HISTORY_NUMBER_RE, parse_honbun
 from search_index import build_search_index
 from reiki_common import MENU_URL, USER_AGENT
 
@@ -68,6 +68,20 @@ def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version
                 problems.append(f"missing_field:{law_id}:{field}")
         if data.get("id") != law_id:
             problems.append(f"id_mismatch:{law_id}")
+        history = data.get("history")
+        if history is None:
+            history = []
+        if not isinstance(history, list):
+            problems.append(f"bad_history_type:{law_id}")
+        else:
+            for entry in history:
+                if not isinstance(entry, dict):
+                    problems.append(f"bad_history_entry:{law_id}")
+                    continue
+                date = str(entry.get("date") or "")
+                number = str(entry.get("number") or "")
+                if not HISTORY_DATE_RE.match(date) or not HISTORY_NUMBER_RE.match(number):
+                    problems.append(f"bad_history_row:{law_id}:{date[:20]}:{number[:20]}")
         articles = data.get("articles")
         if not isinstance(articles, list):
             problems.append(f"bad_articles_type:{law_id}")

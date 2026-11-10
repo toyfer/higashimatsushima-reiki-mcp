@@ -116,6 +116,15 @@ class PostingBuildTest(unittest.TestCase):
         table_indexes = [i for i, row in chunk_by_index.items() if row["law_id"] == "r122RG00000011"]
         self.assertTrue(any(i in seen_indexes for i in table_indexes))
 
+    def test_chunk_rows_carry_full_text_for_request_time_verification(self):
+        body = "随意契約は600万円以下の額で締結できる。" * 20
+        built = build_search_index([law(id="r122RG00000032", title="委託規程", articles=[{"label": "第3条", "heading": "", "text": body, "paragraphs": []}])]).build(data_version="v1", generated_at_utc="t")
+        rows = [row for cf in built["chunks"].values() for row in cf["chunks"]]
+        self.assertTrue(rows)
+        self.assertIn("text", rows[0])
+        self.assertEqual(rows[0]["text"], body.strip())
+        self.assertLessEqual(len(rows[0]["snippet"]), search_index.SNIPPET_CHARS)
+
     def test_manifest_records_scoring_parameters(self):
         built = build_search_index([law(body_text="本文検索の対象。")]).build(data_version="v1", generated_at_utc="t")
         manifest = built["manifest"]

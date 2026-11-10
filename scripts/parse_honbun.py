@@ -25,14 +25,17 @@ HISTORY_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table>", re.S)
 HISTORY_DATE_RE = re.compile(r"^(?:(?:明治|大正|昭和|平成|令和)[0-9０-９元]+年|(?:19|20)[0-9]{2}年)")
 # The number cell also carries document kinds such as 訓令甲第28号, so require
 # a 第N号 tail rather than a fixed prefix list.
-HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,12}第[0-9０-９]+号$")
+HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,30}第[0-9０-９]+号$")
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
 APPENDIX_TABLE_RE = re.compile(r"^別表")
 # 別表第1 and 別表(第2条関係) are both used by the city site; the second form
 # was silently appended to the last supplement (issue #38).
-APPENDIX_START_RE = re.compile(r"^別表(?:\s|第|[\(（]|$)")
+# Table titles appear as 別表, 別表第1, 別表1(第2条関係) and 別表(第2条関係).
+APPENDIX_START_RE = re.compile(r"^別表(?:第?[0-9０-９]+|\s|[\(（]|$)")
+# Prose such as 別表に掲げる… must stay body text and must not raise a warning.
+APPENDIX_TITLE_HINT_RE = re.compile(r"^別表[0-9０-９第\(（]")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
 ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
@@ -235,7 +238,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
                 mode = "appendix"
                 appendix_tables.append(line)
                 continue
-            if mode in {"article", "supplement"}:
+            if mode in {"article", "supplement"} and APPENDIX_TITLE_HINT_RE.match(line):
                 structure_warnings.append(f"appendix_marker_unparsed:{line[:30]}")
 
         if mode == "preamble":
