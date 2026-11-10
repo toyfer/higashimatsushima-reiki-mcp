@@ -225,7 +225,7 @@ test("POST /mcp with valid token returns tools/list", async () => {
     const res = await worker.fetch(new Request("http://localhost/mcp", init), { AUTH_TOKEN: "test-secret" });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.result.tools.length, 4);
+    assert.equal(body.result.tools.length, 5);
   } finally { restore(); }
 });
 
@@ -472,5 +472,102 @@ test("health returns 503 when failure_count alone is nonzero", async () => {
     const res = await worker.fetch(new Request("http://localhost/health"), {});
     assert.equal(res.status, 503);
     assert.equal((await res.json()).ok, false);
+  } finally { restore(); }
+});
+
+const CONTENT_POSTINGS = {
+  "/api/search/postings-03.json": { data_version: "fx", terms: { "随意": [[0, 1.5514]] } },
+  "/api/search/postings-08.json": { data_version: "fx", terms: { "契約": [[0, 1.9229]] } },
+  "/api/search/postings-13.json": { data_version: "fx", terms: { "意契": [[0, 1.5514]] } },
+};
+const CONTENT_CHUNKS = {
+  "/api/search/chunks-000.json": { data_version: "fx", chunks: [
+    { i: 0, law_id: "r122RG00000001", title: "契約規則", label: "第1条", heading: "(随意契約)", kind: "article", source_url: "https://example.invalid/1.html", snippet: "第1条 随意契約は600万円以下の場合にできる。" },
+    { i: 1, law_id: "r122RG00000002", title: "手数料条例", label: "前文", heading: "", kind: "preamble", source_url: "https://example.invalid/1.html", snippet: "手数料の額は別表のとおりとする。" },
+  ] },
+};
+
+test("search_laws_by_content returns chunk hits with source_url and bounded fetches", async () => {
+  const { impl, requested } = pagesRouter({ ...CONTENT_POSTINGS, ...CONTENT_CHUNKS });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_laws_by_content", arguments: { query: "随意契約" } } }), {});
+    const payload = toolText(await res.json());
+    assert.equal(payload.count, 1);
+    assert.equal(payload.results[0].law_id, "r122RG00000001");
+    assert.equal(payload.results[0].label, "第1条");
+    assert.equal(payload.results[0].source_url, "https://example.invalid/1.html");
+    assert.ok(payload.pages_fetches <= 40, `pages_fetches=${payload.pages_fetches}`);
+    assert.ok(payload.pages_fetches < 50, `pages_fetches=${payload.pages_fetches}`);
+    assert.ok(requested.every((u) => u.includes("/api/search/")), requested.join(","));
+    assert.ok(!requested.some((u) => u.endsWith("/api/laws/index.json")), requested.join(","));
+  } finally { restore(); }
+});
+
+test("search_laws_by_content returns zero hits without chunk fetches when no posting matches", async () => {
+  const emptyShards = {};
+  for (let shard = 0; shard < 16; shard += 1) {
+    emptyShards[`/api/search/postings-${String(shard).padStart(2, "0")}.json`] = { data_version: "fx", terms: {} };
+  }
+  const { impl, requested } = pagesRouter({ ...emptyShards, ...CONTENT_POSTINGS, ...CONTENT_CHUNKS });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_laws_by_content", arguments: { query: "宇宙開発" } } }), {});
+    const payload = toolText(await res.json());
+    assert.equal(payload.count, 0);
+    assert.deepEqual(payload.results, []);
+    assert.ok(!requested.some((u) => u.includes("chunks-")), requested.join(","));
+  } finally { restore(); }
+});
+
+test("search_laws_by_content caps results per law", async () => {
+  const many = { data_version: "fx", chunks: Array.from({length: 6}, (_, k) => ({ i: k, law_id: "r122RG00000009", title: "同一条例", label: `第${k+1}条`, heading: "", kind: "article", source_url: "https://example.invalid/9.html", snippet: `監査に関する第${k+1}条。` })) };
+  const postings = {};
+  // 監査 bigrams: 監査,査に,につ -> place all on their python shards via worker fnv is internal;
+  // instead give every shard the same term entries so the test does not depend on shard numbers.
+  for (let shard = 0; shard < 16; shard += 1) {
+    postings[`/api/search/postings-${String(shard).padStart(2, "0")}.json`] = { data_version: "fx", terms: { "監査": [[0,3],[1,3],[2,3],[3,3],[4,3],[5,3]], "査に": [[0,1],[1,1],[2,1],[3,1],[4,1],[5,1]] } };
+  }
+  const { impl } = pagesRouter({ ...postings, "/api/search/chunks-000.json": many });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_laws_by_content", arguments: { query: "監査", limit: 10 } } }), {});
+    const payload = toolText(await res.json());
+    assert.equal(payload.count, 3);
+  } finally { restore(); }
+});
+
+test("search_laws_by_content surfaces Pages failure as a tool error", async () => {
+  const restore = mockFetch(async () => new Response("down", { status: 503 }));
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "search_laws_by_content", arguments: { query: "監査" } } }), {});
+    const body = await res.json();
+    assert.equal(body.result.isError, true);
+    assert.match(body.result.content[0].text, /Pages fetch failed: 503/);
+  } finally { restore(); }
+});
+
+test("search_laws_by_content lazily fetches only chunk shards holding emitted candidates", async () => {
+  // Index 0 -> chunks-000, index 500 -> chunks-001 (CHUNK_SHARD_SIZE=500).
+  const postings = {};
+  for (let shard = 0; shard < 16; shard += 1) {
+    postings[`/api/search/postings-${String(shard).padStart(2, "0")}.json`] = { data_version: "fx", terms: { "監査": [[0, 3], [500, 2]] } };
+  }
+  const routes = {
+    ...postings,
+    "/api/search/chunks-000.json": { data_version: "fx", chunks: [{ i: 0, law_id: "r122RG00000021", title: "甲条例", label: "第1条", heading: "", kind: "article", source_url: "https://example.invalid/a.html", snippet: "監査の甲。" }] },
+    "/api/search/chunks-001.json": { data_version: "fx", chunks: [{ i: 500, law_id: "r122RG00000022", title: "乙条例", label: "第2条", heading: "", kind: "article", source_url: "https://example.invalid/b.html", snippet: "監査の乙。" }] },
+    "/api/search/chunks-002.json": { data_version: "fx", chunks: [{ i: 1000, law_id: "r122RG00000023", title: "丙条例", label: "第3条", heading: "", kind: "article", source_url: "https://example.invalid/c.html", snippet: "監査の丙。" }] },
+  };
+  const { impl, requested } = pagesRouter(routes);
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "search_laws_by_content", arguments: { query: "監査", limit: 2 } } }), {});
+    const payload = toolText(await res.json());
+    assert.equal(payload.count, 2);
+    assert.deepEqual(payload.results.map((r) => r.law_id), ["r122RG00000021", "r122RG00000022"]);
+    assert.ok(requested.some((u) => u.endsWith("chunks-000.json")), requested.join(","));
+    assert.ok(requested.some((u) => u.endsWith("chunks-001.json")), requested.join(","));
+    assert.ok(!requested.some((u) => u.endsWith("chunks-002.json")), requested.join(","));
   } finally { restore(); }
 });
