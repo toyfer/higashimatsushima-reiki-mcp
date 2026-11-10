@@ -858,3 +858,131 @@ test("reiki_status reports whether the search index is published", async () => {
     assert.equal(payload.search.chunk_count, 2);
   } finally { restore(); }
 });
+
+const EXACT_GRAMS = {
+  "随意": [1, 2, 3],
+  "意契": [1, 2, 3],
+  "契約": [1, 2, 3, 4],
+  "60": [0, 1, 4],
+  "00": [0, 1, 4],
+  "0万": [0, 1, 4],
+  "万円": [0, 1, 4],
+};
+
+const EXACT_POSTINGS = (() => {
+  const shard = { data_version: "fx", terms: {} };
+  for (const [gram, indexes] of Object.entries(EXACT_GRAMS)) {
+    shard.terms[gram] = indexes.map((index) => [index, 1]);
+  }
+  const routes = {};
+  for (let s = 0; s < 16; s += 1) routes[`/api/search/postings-${String(s).padStart(2, "0")}.json`] = shard;
+  return routes;
+})();
+
+const EXACT_CHUNKS = {
+  "/api/search/chunks-000.json": {
+    data_version: "fx",
+    chunks: [
+      { i: 0, law_id: "r122RG00000031", title: "資格基準", label: "別表第1", heading: "", kind: "appendix_table", source_url: "https://e/31", snippet: "評価点600点", text: "評価点600点、契約額500万円を基準とする。" },
+      { i: 1, law_id: "r122RG00000032", title: "委託規程", label: "第3条", heading: "(随意契約)", kind: "article", source_url: "https://e/32", snippet: "随意契約は600万円以下", text: "随意契約は600万円以下の額で締結できる。" },
+      { i: 2, law_id: "r122RG00000033", title: "別条例", label: "第2条", heading: "", kind: "article", source_url: "https://e/33", snippet: "随意契約の相手方", text: "随意契約の相手方は公募する。" },
+      { i: 3, law_id: "r122RG00000034", title: "両建条例", label: "第1条", heading: "", kind: "article", source_url: "https://e/34", snippet: "随意契約の方法", text: "随意契約の方法は規則で定める。" },
+      { i: 4, law_id: "r122RG00000034", title: "両建条例", label: "第2条", heading: "", kind: "article", source_url: "https://e/34", snippet: "600万円を超える", text: "600万円を超える契約は入札による。" },
+    ],
+  },
+};
+
+function exactRouter() {
+  return pagesRouter({ ...EXACT_POSTINGS, ...EXACT_CHUNKS });
+}
+
+test("exact phrase matching rejects chunks that only share the bigrams", async () => {
+  const { impl } = exactRouter();
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "600万円" }));
+    const lawIds = payload.results.map((row) => row.law_id);
+    assert.ok(!lawIds.includes("r122RG00000031"), lawIds.join(","));
+    assert.deepEqual(lawIds.sort(), ["r122RG00000032", "r122RG00000034"]);
+    assert.equal(payload.match_type, undefined);
+    assert.ok(payload.results.every((row) => row.match_type === "exact"));
+    assert.equal(payload.filtered_out_exact, 1);
+    assert.equal(payload.completeness, "complete");
+  } finally { restore(); }
+});
+
+test("exact:false keeps bigram-only candidates and labels them approximate", async () => {
+  const { impl } = exactRouter();
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "600万円", exact: false }));
+    assert.equal(payload.count, 3);
+    assert.ok(payload.results.every((row) => row.match_type === "approximate"));
+  } finally { restore(); }
+});
+
+test("snippets carry highlights that point at the matched term", async () => {
+  const { impl } = pagesRouter({
+    ...EXACT_POSTINGS,
+    ...EXACT_CHUNKS,
+    "/api/laws/r122RG00000032.json": {
+      id: "r122RG00000032",
+      title: "委託規程",
+      data_version: "fx",
+      source_url: "https://e/32",
+      articles: [{ label: "第3条", heading: "(随意契約)", text: "随意契約は600万円以下の額で締結できる。" }],
+    },
+  });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "随意契約", law_id: "r122RG00000032" }));
+    const hit = payload.results[0];
+    assert.equal(hit.highlights.length > 0, true);
+    const highlight = hit.highlights[0];
+    assert.equal(highlight.term, "随意契約");
+    assert.equal(highlight.match_type, "exact");
+    assert.ok(hit.snippet.slice(highlight.start, highlight.end).includes("随意契約"), JSON.stringify(hit));
+  } finally { restore(); }
+});
+
+test("chunk scope requires every term in the same chunk, law scope does not", async () => {
+  const { impl } = exactRouter();
+  const restore = mockFetch(impl);
+  try {
+    const chunkScope = toolText(await callTool("search_laws_by_content", { query: "随意契約 600万円", scope: "chunk" }));
+    assert.deepEqual(chunkScope.results.map((row) => row.law_id), ["r122RG00000032"]);
+    assert.equal(chunkScope.operator, "AND");
+
+    const lawScope = toolText(await callTool("search_laws_by_content", { query: "随意契約 600万円", scope: "law" }));
+    assert.deepEqual(lawScope.results.map((row) => row.law_id).sort(), ["r122RG00000032", "r122RG00000034"]);
+    const twoProof = lawScope.results.find((row) => row.law_id === "r122RG00000034");
+    assert.equal(twoProof.matches.length, 2);
+    assert.deepEqual(twoProof.matched_terms.sort(), ["600万円", "随意契約"]);
+    assert.equal(lawScope.group_by, "law");
+  } finally { restore(); }
+});
+
+test("OR widens chunk scope to any single term", async () => {
+  const { impl } = exactRouter();
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "随意契約 600万円", operator: "OR", limit: 20 }));
+    const lawIds = new Set(payload.results.map((row) => row.law_id));
+    assert.ok(lawIds.has("r122RG00000033"), [...lawIds].join(","));
+    assert.equal(payload.operator, "OR");
+    assert.ok(payload.results.every((row) => row.unmatched_terms.length >= 0));
+  } finally { restore(); }
+});
+
+test("search reports counters and index caps for completeness judgement", async () => {
+  const { impl } = exactRouter();
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "随意契約" }));
+    for (const key of ["candidates", "candidates_examined", "filtered_out_no_term", "filtered_out_exact", "skipped_per_law", "index_caps"]) {
+      assert.ok(key in payload, key);
+    }
+    assert.equal(payload.index_caps.pages_fetch_limit, 40);
+    assert.equal(payload.index_caps.candidate_scan_limit, 300);
+  } finally { restore(); }
+});

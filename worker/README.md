@@ -28,11 +28,23 @@ Law IDs must match `^r\d+RG\d+$`, for example `r122RG00000002`. Upper and lower 
 
 `search_laws_by_title` reads the small title index and returns summaries only (`id`, `title`, `ordinance_number`, `classification`, `enacted_date`, `article_count`, `source_url`). It never returns ordinance bodies, so a `limit=50` query stays small. Use `get_law` for the body.
 
-`search_laws_by_content` is a bigram TF-IDF keyword search and is approximate by design. The published index keeps at most 50 postings per term and 3 postings per law per term, and the Worker stops after 40 Pages fetches or 300 ranked candidates. Every response carries `truncated` and `truncation_reasons` (`pages_fetch_budget`, `candidate_scan_limit`, `max_results_per_law`) so a caller can tell an incomplete ranking from a complete one. A zero-hit result with `truncated: true` means the caps were reached, not that the term is absent from the corpus.
+`search_laws_by_content` runs in two stages. The bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text, which is published in the chunk shard as `text`. Verification matters: `600万円` is `60` + `00` + `0万` + `万円`, and a chunk containing `600点` and `500万円` holds all four bigrams without containing `600万円`. With `exact: true` (the default) such a chunk is rejected and counted in `filtered_out_exact`.
 
-Queries need at least two searchable characters after NFKC normalisation, because the index stores bigrams only. `税` is rejected with `-32602`; `税金` or a longer phrase works.
+| Argument | Values | Meaning |
+|---|---|---|
+| `query` | string | Space-separated terms, each at least 2 searchable characters |
+| `limit` | 1-50 | Displayed results, default 10 |
+| `law_id` | law ID | Restrict to one ordinance (reads only that JSON, one fetch) |
+| `operator` | `AND` (default) / `OR` | How terms combine |
+| `scope` | `chunk` (default) / `law` | `chunk`: every term must appear in the same chunk. `law`: every term must appear somewhere in the same ordinance |
+| `group_by` | `chunk` / `law` | Collapse results per ordinance; `law` whenever `scope=law` |
+| `exact` | `true` (default) / `false` | `false` keeps bigram-only hits and labels them `approximate` |
 
-Passing `law_id` restricts the search to that ordinance. In that mode the Worker reads the single ordinance JSON and scores its articles, supplements and appendix tables locally, so no page of the global posting index can leak results from other ordinances, and the call costs one fetch.
+Each result carries `match_type` (`exact` / `approximate`), `matched_terms`, `unmatched_terms`, a query-aware `snippet` with `highlights: [{term, start, end, match_type}]` (offsets are relative to `snippet`), and `unit_id` when a result maps to an appendix table or supplement. In `scope=law` each result also has `matches[]`, one evidence entry per matched term with its own label, snippet and highlights.
+
+Every response reports `completeness` (`complete` / `partial`) plus `candidates`, `candidates_examined`, `filtered_out_no_term`, `filtered_out_exact`, `skipped_per_law`, `truncation_reasons` and `index_caps`. `partial` means a cap was reached, so a zero-result answer with `completeness: partial` is not proof the corpus lacks the phrase. The index itself keeps at most 50 postings per term and 3 per law per term; `index_caps` echoes those limits and the per-call fetch and scan budgets.
+
+`scope=law` aggregates the candidates the call actually examined. With the default budgets that is complete for most queries, but when `completeness` is `partial` treat law-level absence as unproven.
 
 `get_article` returns the whole article by default. `paragraph=2` returns only that paragraph, and `item=2` (which requires `paragraph`) returns only that item. Missing paragraphs or items return `found: false` with `available_paragraphs` or `available_items` instead of the full ordinance.
 
