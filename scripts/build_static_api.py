@@ -16,6 +16,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from daily_check import collect_from_taikei, extract_current_date, fetch_text
 from parse_honbun import parse_honbun
+from search_index import build_search_index
 from reiki_common import MENU_URL, USER_AGENT
 
 SAFE_ID_RE = re.compile(r"^r\d+RG\d+$", re.I)
@@ -144,6 +145,7 @@ def main() -> int:
     selected_count = len(laws)
     is_full_build = not args.limit and not args.only_id
     index: list[dict[str, Any]] = []
+    parsed_laws: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     warning_count = 0
     warnings_by_law: list[dict[str, Any]] = []
@@ -185,6 +187,7 @@ def main() -> int:
         data["menu_sha256"] = menu_hash
         data["content_current_date"] = current_date
         dump_json(laws_dir / f"{law_id}.json", public_law(data))
+        parsed_laws.append(public_law(data))
         first_article = data["articles"][0]["label"] if data["articles"] else ""
         index.append(
             {
@@ -226,7 +229,15 @@ def main() -> int:
     dump_json(api_root / "meta.json", meta)
     dump_json(api_root / "laws" / "index.json", {"data_version": version, "generated_at_utc": generated_at, "laws": index})
     dump_json(api_root / "search" / "title-index.json", {"data_version": version, "laws": [{"id": x["id"], "title": x["title"], "ordinance_number": x["ordinance_number"]} for x in index]})
-    validation_problems = validate_built_api(api_root, index, version)
+    search_manifest = build_search_index(parsed_laws).write(
+        api_root / "search", data_version=version, generated_at_utc=generated_at
+    )
+    search_problems = []
+    if search_manifest.get("law_count") != len(parsed_laws) or search_manifest.get("chunk_count", 0) <= 0:
+        search_problems.append(
+            f"search_index_mismatch:law_count={search_manifest.get('law_count')}:chunks={search_manifest.get('chunk_count')}:laws={len(parsed_laws)}"
+        )
+    validation_problems = validate_built_api(api_root, index, version) + search_problems
     count_matches = len(index) + len(failures) == selected_count
     full_build_complete = (not is_full_build) or (len(index) == selected_count and not failures)
     healthy = bool(index) and not failures and not validation_problems and count_matches and full_build_complete
@@ -239,8 +250,11 @@ def main() -> int:
         "warning_count": warning_count,
         "validation_problems": validation_problems,
         "data_version": version,
+        "search_chunk_count": search_manifest.get("chunk_count", 0),
     }
     dump_json(api_root / "health.json", health)
+    meta["search_chunk_count"] = search_manifest.get("chunk_count", 0)
+    dump_json(api_root / "meta.json", meta)
 
     (out_root / ".nojekyll").write_text("", encoding="utf-8")
     print(json.dumps(meta, ensure_ascii=False, indent=2))

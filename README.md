@@ -27,6 +27,9 @@ After a full build and Pages deploy, the public endpoints are:
 | `api/health.json` | Minimal build health: `ok`, `law_count`, `failure_count`, `data_version` |
 | `api/laws/index.json` | Ordinance list with title, ordinance number, classification and article count |
 | `api/search/title-index.json` | Small title search index for the Worker |
+| `api/search/manifest.json` | Keyword body-search index manifest: `bigram-tfidf`, counts and shard files |
+| `api/search/chunks-*.json` | Body-search chunks with title, article label, snippet and `source_url` |
+| `api/search/postings-*.json` | Bigram TF-IDF postings sharded by term hash |
 | `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables and history |
 
 Example law IDs look like `r122RG00000002`.
@@ -64,6 +67,7 @@ python3 -m unittest discover -s tests -v
 python3 scripts/daily_check.py --mode check
 python3 scripts/build_static_api.py --limit 5 --delay 0.1
 python3 scripts/build_static_api.py --only-id r122RG00000002 --delay 0.1
+python3 scripts/measure_search_index.py
 ```
 
 ## Files
@@ -75,6 +79,8 @@ python3 scripts/build_static_api.py --only-id r122RG00000002 --delay 0.1
 | `scripts/daily_check.py` | Menu check and systematic index collector |
 | `scripts/parse_honbun.py` | Ordinance body HTML parser |
 | `scripts/build_static_api.py` | Static API builder writing under `site/api/` |
+| `scripts/search_index.py` | Bigram TF-IDF body-search index builder |
+| `scripts/measure_search_index.py` | Local / CI measurement of search index build cost and size |
 | `data/status/latest.json` | Last known menu hash, site current date and ordinance URL list |
 | `site/index.html` | Human-readable entry page for the static API |
 | `tests/` | Network-free parser and checker tests |

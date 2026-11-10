@@ -107,6 +107,33 @@ function scoreLaw(law, query) {
   return 0;
 }
 
+const POSTING_SHARD_COUNT = 16;
+const MAX_RESULTS_PER_LAW = 3;
+const MAX_PAGES_FETCHES = 40;
+const CHUNK_SHARD_SIZE = 500;
+const MAX_CANDIDATES_WALKED = 300;
+
+function fnv1a32(value) {
+  let result = 2166136261;
+  for (const char of String(value)) {
+    result ^= char.codePointAt(0);
+    result = Math.imul(result, 16777619) >>> 0;
+  }
+  return result >>> 0;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").normalize("NFKC").toLowerCase();
+}
+
+function searchBigrams(value) {
+  const normalized = normalizeSearchText(value).replace(/[^\p{L}\p{N}]/gu, "");
+  if (normalized.length < 2) return normalized ? [normalized] : [];
+  const grams = [];
+  for (let i = 0; i < normalized.length - 1; i += 1) grams.push(normalized.slice(i, i + 2));
+  return grams;
+}
+
 function invalidParams(message) {
   return new ProtocolError(-32602, message);
 }
@@ -154,6 +181,72 @@ async function callTool(env, name, args) {
     }
     return textResult(JSON.stringify({ law_id: lawId, title: law.title, articles: found }, null, 2));
   }
+  if (name === "search_laws_by_content") {
+    const query = String(input.query || "").trim();
+    if (!query) throw invalidParams("query is required");
+    const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
+    const grams = [...new Set(searchBigrams(query))];
+    if (!grams.length) throw invalidParams("query must contain searchable characters");
+    const shardIds = [...new Set(grams.map((g) => fnv1a32(g) % POSTING_SHARD_COUNT))].sort((a, b) => a - b);
+    const budget = { used: 0 };
+    const countedFetch = async (path) => {
+      if (budget.used >= MAX_PAGES_FETCHES) return null;
+      budget.used += 1;
+      return fetchPagesJson(env, path);
+    };
+    let fetches = 0;
+    const scores = new Map();
+    for (const shard of shardIds) {
+      if (budget.used >= MAX_PAGES_FETCHES) break;
+      const data = await countedFetch(`/api/search/postings-${String(shard).padStart(2, "0")}.json`);
+      fetches = budget.used;
+      if (!data) break;
+      const terms = data && typeof data === "object" ? data.terms || {} : {};
+      for (const gram of grams) {
+        const entries = Array.isArray(terms[gram]) ? terms[gram] : [];
+        for (const entry of entries) {
+          if (!Array.isArray(entry) || entry.length < 2) continue;
+          const [index, score] = entry;
+          scores.set(index, (scores.get(index) || 0) + Number(score || 0));
+        }
+      }
+    }
+    const rankedIndexes = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([index]) => index);
+    // Lazy display resolution: walk candidates in rank order and fetch only
+    // the chunk shards that hold candidates actually emitted (plus skipped
+    // same-law overflow). Pre-fetching shards for the top-N candidates would
+    // need dozens of files and exhaust the fetch budget before any result
+    // could be displayed.
+    const chunkCache = new Map();
+    const perLaw = new Map();
+    const results = [];
+    let walked = 0;
+    for (const index of rankedIndexes) {
+      if (results.length >= limit || walked >= MAX_CANDIDATES_WALKED) break;
+      walked += 1;
+      const shard = Math.floor(index / CHUNK_SHARD_SIZE);
+      if (!chunkCache.has(shard)) {
+        const data = await countedFetch(`/api/search/chunks-${String(shard).padStart(3, "0")}.json`);
+        fetches = budget.used;
+        if (!data) break;
+        const byIndex = new Map();
+        const rows = Array.isArray(data.chunks) ? data.chunks : [];
+        for (const row of rows) byIndex.set(row.i, row);
+        chunkCache.set(shard, byIndex);
+      }
+      const row = chunkCache.get(shard).get(index);
+      if (!row) continue;
+      const count = perLaw.get(row.law_id) || 0;
+      if (count >= MAX_RESULTS_PER_LAW) continue;
+      perLaw.set(row.law_id, count + 1);
+      results.push({
+        law_id: row.law_id, title: row.title, label: row.label, heading: row.heading || "",
+        kind: row.kind || "", snippet: row.snippet || "", source_url: row.source_url || "",
+        score: Math.round((scores.get(index) || 0) * 10000) / 10000,
+      });
+    }
+    return textResult(JSON.stringify({ query, count: results.length, pages_fetches: fetches, candidates: rankedIndexes.length, results }, null, 2));
+  }
   throw invalidParams(`Unknown tool: ${name}`);
 }
 
@@ -170,6 +263,19 @@ const TOOLS = [
       type: "object",
       properties: {
         query: { type: "string", description: "Title keyword, ordinance number, or law ID fragment" },
+        limit: { type: "number", description: "Maximum results, 1 to 50. Default 10." },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "search_laws_by_content",
+    description: "Keyword body search over Higashimatsushima ordinances using the bigram TF-IDF index on GitHub Pages. Returns matching chunks with law title, article label, snippet and source_url. Fetches only the needed posting/chunk shards.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Japanese keyword query, e.g. 随意契約 600万円" },
         limit: { type: "number", description: "Maximum results, 1 to 50. Default 10." },
       },
       required: ["query"],
