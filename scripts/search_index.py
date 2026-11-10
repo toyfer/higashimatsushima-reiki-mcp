@@ -88,6 +88,14 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
     source_url = str(law.get("source_url") or "")
     chunks: list[dict[str, Any]] = []
 
+    # Appendix tables that only have a downloadable RTF/PNG are not
+    # complete text: flag them so the Worker can surface
+    # content_status=external_resource_only (issue #51).
+    resources = law.get("resources") or []
+    external_only = bool(resources) and any(
+        "\n" not in str(table).strip() for table in (law.get("appendix_tables") or [])
+    )
+
     def add(label: str, heading: str, body: str, kind: str) -> None:
         collapsed = _collapse(body)
         if not collapsed:
@@ -142,6 +150,8 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
             groups.setdefault(label, []).append(collapsed_line)
         if not groups:
             add(label, "", raw_body, "appendix_table")
+            if external_only and label == (lines[0].strip()[:40] if lines else ""):
+                chunks[-1]["content_status"] = "external_resource_only"
             continue
         for group_label, rows in groups.items():
             add(group_label, "", " ".join(rows), "appendix_table")

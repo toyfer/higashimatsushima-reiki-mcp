@@ -337,6 +337,8 @@ const SAMPLE_LAW = {
     {
       label: "第1条",
       heading: "（市の休日）",
+      chapter: "第1章",
+      chapter_title: "総則",
       paragraphs: [
         { number: 1, text: "市の休日を定める。", items: [{ label: "(1)", text: "日曜日" }, { label: "(2)", text: "土曜日" }] },
         { number: 2, text: "第二項の本文。", items: [] },
@@ -344,8 +346,13 @@ const SAMPLE_LAW = {
     },
     { label: "第2条", heading: "（期限の特例）", paragraphs: [{ number: 1, text: "期限の特例を定める。", items: [] }] },
   ],
-  appendix_tables: ["別表(第2条関係)\n事務 名称 金額", "別表第2\n項目 金額"],
+  appendix_tables: ["別表(第2条関係)\n事務 名称 金額", "別表第2(第2条関係)"],
   supplements: ["附則\nこの条例は、公布の日から施行する。", "附則(平成18年3月20日条例第13号)\n改正規定。"],
+  chapters: [
+    { kind: "chapter", number: "第1章", title: "総則", text: "第1章 総則" },
+    { kind: "chapter", number: "第2章", title: "雑則", text: "第2章 雑則" },
+  ],
+  resources: [null, { label: "別表第2(第2条関係)", href: "word/r122FG00000002.rtf", image_url: "word/r122FG00000002s.png" }],
   history: [{ date: "平成17年4月1日", number: "条例第2号" }],
 };
 
@@ -812,6 +819,11 @@ test("get_toc lists articles and units with pagination", async () => {
     assert.equal(payload.appendix_table_count, 2);
     assert.deepEqual(payload.articles.map((article) => article.label), ["第1条", "第2条"]);
     assert.deepEqual(payload.supplements, ["附則1", "附則2"]);
+    assert.deepEqual(payload.chapters.map((chapter) => chapter.text), ["第1章 総則", "第2章 雑則"]);
+    assert.equal(payload.articles[0].chapter, "第1章");
+    assert.equal(payload.articles[0].chapter_title, "総則");
+    assert.equal(payload.resources.length, 2);
+    assert.equal(payload.resources[1].href, "word/r122FG00000002.rtf");
     assert.equal(payload.next_offset, null);
     const paged = toolText(await callTool("get_toc", { law_id: "r122RG00000002", limit: 1 }));
     assert.equal(paged.next_offset, 1);
@@ -826,6 +838,12 @@ test("get_unit returns one appendix table or supplement", async () => {
     assert.equal(table.found, true);
     assert.equal(table.unit_id, "r122RG00000002#appendix_table-2");
     assert.match(table.text, /別表第2/);
+    // Heading-only appendix with a downloadable resource is flagged, not
+    // presented as a complete table (issue #51).
+    assert.equal(table.content_status, "external_resource_only");
+    assert.equal(table.resource.href, "word/r122FG00000002.rtf");
+    const complete = toolText(await callTool("get_unit", { law_id: "r122RG00000002", kind: "appendix_table", n: 1 }));
+    assert.equal(complete.content_status, "complete");
     const supplement = toolText(await callTool("get_unit", { law_id: "r122RG00000002", kind: "supplement", n: 2 }));
     assert.equal(supplement.label, "附則2");
     assert.match(supplement.text, /改正規定/);
