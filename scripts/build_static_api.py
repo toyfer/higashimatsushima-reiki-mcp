@@ -42,6 +42,10 @@ def public_law(data: dict[str, Any]) -> dict[str, Any]:
 
 # Warnings that always mean the structured output cannot be trusted.
 BLOCKING_WARNING_PREFIXES = ("item_structure_mismatch:", "no_articles_parsed")
+# Warnings about an optional structure that is simply absent. They are recorded
+# in meta.json but do not stop a full build: one law without a 沿革 table must
+# not block publishing the other 1191.
+INFORMATIONAL_WARNING_PREFIXES = ("history_table_empty_or_unrecognized", "appendix_marker_unparsed:")
 
 
 def validate_built_api(api_root: Path, index: list[dict[str, Any]], data_version: str) -> list[str]:
@@ -184,9 +188,10 @@ def main() -> int:
             if args.fail_on_error:
                 return 3
             continue
-        if law_warnings and args.fail_on_error:
-            failures.append({"id": law_id, "url": url, "error": "; ".join(law_warnings)})
-            print(f"WARNING: {law_id} parse warnings treated as failures: {'; '.join(law_warnings)}", file=sys.stderr)
+        action_warnings = [w for w in law_warnings if not w.startswith(INFORMATIONAL_WARNING_PREFIXES)]
+        if action_warnings and args.fail_on_error:
+            failures.append({"id": law_id, "url": url, "error": "; ".join(action_warnings)})
+            print(f"WARNING: {law_id} parse warnings treated as failures: {'; '.join(action_warnings)}", file=sys.stderr)
             return 3
         data["fetched_at_utc"] = generated_at
         data["menu_sha256"] = menu_hash
