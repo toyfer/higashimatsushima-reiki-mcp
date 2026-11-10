@@ -18,10 +18,19 @@ SECONDARY_TITLE_RE = re.compile(r'<h2 class="heading-lv2A">(.*?)</h2>', re.S)
 DATENUMBER_RE = re.compile(r'<p class="datenumber-area[^"]*">(.*?)</p>', re.S)
 TAIKEI_RE = re.compile(r'<span class="taikei-item">(.*?)</span>\s*</div>', re.S)
 ENKAKU_ROW_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
+# The history table lives in the 書誌情報 tab, not in the body. Reading every
+# <tr> on the page pulled appendix table rows into history (issue #36).
+HISTORY_SCOPE_RE = re.compile(r'<div id="shoshi-inf".*?(?:<!-- /書誌情報 -->|</div>\s*</div>)', re.S)
+HISTORY_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table>", re.S)
+HISTORY_DATE_RE = re.compile(r"^(?:(?:明治|大正|昭和|平成|令和)[0-9０-９元]+年|(?:19|20)[0-9]{2}年)")
+HISTORY_NUMBER_RE = re.compile(r"^(?:条例|規則|訓令|告示|指令|規程|要綱)第[0-9０-９]+号")
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
 APPENDIX_TABLE_RE = re.compile(r"^別表")
+# 別表第1 and 別表(第2条関係) are both used by the city site; the second form
+# was silently appended to the last supplement (issue #38).
+APPENDIX_START_RE = re.compile(r"^別表(?:\s|第|[\(（]|$)")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
 ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
@@ -72,13 +81,30 @@ def split_leading_heading(rest: str) -> tuple[str, str]:
     return "", rest
 
 
+def history_scope(html: str) -> str | None:
+    match = HISTORY_SCOPE_RE.search(html)
+    return match.group(0) if match else None
+
+
 def parse_history(html: str) -> list[dict[str, str]]:
+    scope = history_scope(html)
+    if scope is None:
+        return []
+    table = HISTORY_TABLE_RE.search(scope)
+    if table is None:
+        return []
     history: list[dict[str, str]] = []
-    for row in ENKAKU_ROW_RE.findall(html):
+    for row in ENKAKU_ROW_RE.findall(table.group(1)):
         cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
         cells = [c for c in cells if c and c not in {"◆", "◇"}]
-        if len(cells) >= 2:
-            history.append({"date": cells[0], "number": cells[1]})
+        if len(cells) < 2:
+            continue
+        date, number = cells[0], cells[1]
+        # Appendix rows such as "1 | 手数料の名称" have the same two-cell shape,
+        # so only keep rows that really look like an enactment/amendment entry.
+        if not HISTORY_DATE_RE.match(date) or not HISTORY_NUMBER_RE.match(number):
+            continue
+        history.append({"date": date, "number": number})
     return history
 
 
@@ -118,6 +144,8 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     mode = "preamble"
     current_article: dict[str, Any] | None = None
     pending_heading = ""
+    deferred_heading = ""
+    structure_warnings: list[str] = []
 
     def flush_article() -> None:
         nonlocal current_article
@@ -143,13 +171,29 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             and mode in {"preamble", "article"}
             and not APPENDIX_TABLE_RE.match(line)
         ):
-            pending_heading = line
-            if current_article is not None:
-                current_article["_lines"].append(line)
+            # A heading line introduces the article that follows it. Keep it for
+            # that article only and never append it to the article already being
+            # parsed, which mixed the next article's heading into the previous
+            # article text (issue #40).
+            if current_article is None:
+                pending_heading = line
+            else:
+                deferred_heading = line
             continue
 
         article_match = ARTICLE_START_RE.match(line)
-        if article_match and not SUPPLEMENT_RE.match(line):
+        starts_article = bool(article_match) and not SUPPLEMENT_RE.match(line)
+        if deferred_heading:
+            if starts_article:
+                if not pending_heading:
+                    pending_heading = deferred_heading
+            elif current_article is not None:
+                current_article["_lines"].append(deferred_heading)
+            elif not pending_heading:
+                pending_heading = deferred_heading
+            deferred_heading = ""
+
+        if starts_article and article_match is not None:
             flush_article()
             mode = "article"
             number_text = article_match.group(1)
@@ -184,11 +228,13 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             continue
 
         if APPENDIX_TABLE_RE.match(line):
-            if re.match(r"^別表第[0-9０-９一二三四五六七八九十]+", line):
+            if APPENDIX_START_RE.match(line):
                 flush_article()
                 mode = "appendix"
                 appendix_tables.append(line)
                 continue
+            if mode in {"article", "supplement"}:
+                structure_warnings.append(f"appendix_marker_unparsed:{line[:30]}")
 
         if mode == "preamble":
             preamble.append(line)
@@ -223,7 +269,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
 
     body_text = "\n".join(preamble)
     plain_text = "\n".join(lines)
-    parse_warnings: list[str] = []
+    parse_warnings: list[str] = list(structure_warnings)
     if not articles and not body_text:
         parse_warnings.append("no_articles_parsed")
     for parsed_article in articles:
@@ -237,6 +283,9 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             parse_warnings.append(
                 f"item_structure_mismatch:{parsed_article['label']}:text={len(item_lines)}:structured={structured_items}"
             )
+    history = parse_history(html)
+    if not history and history_scope(html) is not None:
+        parse_warnings.append("history_table_empty_or_unrecognized")
     return {
         "id": law_id,
         "title": title or index_title,
@@ -252,7 +301,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "article_count": len(articles),
         "supplements": supplements,
         "appendix_tables": appendix_tables,
-        "history": parse_history(html),
+        "history": history,
         "plain_text": plain_text,
         "text_sha256": hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),
         "parse_warnings": parse_warnings,
