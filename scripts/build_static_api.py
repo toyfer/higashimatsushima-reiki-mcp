@@ -144,6 +144,11 @@ def main() -> int:
     generated_at = datetime.now(timezone.utc).isoformat()
     selected_count = len(laws)
     is_full_build = not args.limit and not args.only_id
+    # Compute the version before writing anything so every law file can carry the
+    # same data_version the worker reports (issue #44) and can be checked against
+    # the search shards (issue #41).
+    version_source = f"{generated_at}:{current_date}:{selected_count}:{menu_hash}"
+    version = hashlib.sha256(version_source.encode("utf-8")).hexdigest()[:16]
     index: list[dict[str, Any]] = []
     parsed_laws: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
@@ -186,6 +191,7 @@ def main() -> int:
         data["fetched_at_utc"] = generated_at
         data["menu_sha256"] = menu_hash
         data["content_current_date"] = current_date
+        data["data_version"] = version
         dump_json(laws_dir / f"{law_id}.json", public_law(data))
         parsed_laws.append(public_law(data))
         first_article = data["articles"][0]["label"] if data["articles"] else ""
@@ -209,8 +215,6 @@ def main() -> int:
         if args.delay > 0:
             time.sleep(args.delay)
 
-    version_source = f"{generated_at}:{current_date}:{len(index)}:{menu_hash}"
-    version = hashlib.sha256(version_source.encode("utf-8")).hexdigest()[:16]
     meta = {
         "name": "Higashimatsushima City ordinances static API",
         "generated_at_utc": generated_at,
@@ -228,7 +232,25 @@ def main() -> int:
     meta["warnings"] = warnings_by_law
     dump_json(api_root / "meta.json", meta)
     dump_json(api_root / "laws" / "index.json", {"data_version": version, "generated_at_utc": generated_at, "laws": index})
-    dump_json(api_root / "search" / "title-index.json", {"data_version": version, "laws": [{"id": x["id"], "title": x["title"], "ordinance_number": x["ordinance_number"]} for x in index]})
+    dump_json(
+        api_root / "search" / "title-index.json",
+        {
+            "data_version": version,
+            "generated_at_utc": generated_at,
+            "laws": [
+                {
+                    "id": x["id"],
+                    "title": x["title"],
+                    "ordinance_number": x["ordinance_number"],
+                    "classification": x["classification"],
+                    "enacted_date": x["enacted_date"],
+                    "article_count": x["article_count"],
+                    "source_url": x["source_url"],
+                }
+                for x in index
+            ],
+        },
+    )
     search_manifest = build_search_index(parsed_laws).write(
         api_root / "search", data_version=version, generated_at_utc=generated_at
     )
