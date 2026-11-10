@@ -46,6 +46,9 @@ class PagesGuardFailClosedTest(unittest.TestCase):
         self.assertNotIn("secrets.", self.pages)
         self.assertNotIn("npm", self.pages)
 
+    def test_pages_rebuilds_search_index_when_builder_changes(self) -> None:
+        self.assertIn("'scripts/search_index.py'", self.pages)
+
 
 class PullRequestTestWorkflowTest(unittest.TestCase):
     @classmethod
