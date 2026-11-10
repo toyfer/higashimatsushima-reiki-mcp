@@ -234,6 +234,8 @@ class SearchIndexBuilder:
             f"postings-{shard:02d}.json": {"data_version": data_version, "terms": sharded.get(shard, {})}
             for shard in range(POSTING_SHARD_COUNT)
         }
+        posting_terms = len(postings)
+        posting_entries = sum(len(entries) for entries in postings.values())
         manifest = {
             "version": 1,
             "kind": "bigram-tfidf",
@@ -247,6 +249,10 @@ class SearchIndexBuilder:
             "posting_shards": POSTING_SHARD_COUNT,
             "max_postings_per_term": MAX_POSTINGS_PER_TERM,
             "max_postings_per_law_per_term": MAX_POSTINGS_PER_LAW_PER_TERM,
+            # Vocabulary and total posting sizes, so index growth can be
+            # monitored (raising these caps would enlarge the shards quickly).
+            "posting_terms": posting_terms,
+            "posting_entries": posting_entries,
             "files": {"chunks": sorted(chunk_files), "postings": sorted(posting_files)},
         }
         return {"manifest": manifest, "chunks": chunk_files, "postings": posting_files}
