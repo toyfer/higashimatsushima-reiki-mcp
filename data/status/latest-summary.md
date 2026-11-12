@@ -1,6 +1,6 @@
 ## Higashimatsushima ordinance daily check
 
-- Checked at UTC: `2026-11-10T23:17:43.847608+00:00`
+- Checked at UTC: `2026-11-12T00:40:29.565524+00:00`
 - Menu: https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html
 - Current date on site: `令和8年6月26日`
 - Changed: `false`
