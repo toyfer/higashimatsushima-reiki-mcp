@@ -30,7 +30,7 @@ A push that only refreshes `data/status/latest.json` still takes the 5-ordinance
 
 ### Index handoff between workflows
 
-`daily-reiki-check.yml` publishes the check status and does not touch the published index. When it asks `pages.yml` for a full build it passes `status_artifact`, and `pages.yml` downloads that artifact in the build job instead of crawling the status a second time. The workflow also returns `status_artifact` as an output, so a caller can chain the artifact it just produced.
+`daily-reiki-check.yml` publishes the check status and does not touch the published index. When it asks `pages.yml` for a full build it passes `status_artifact`, and `pages.yml` downloads that artifact in the build job instead of crawling the status a second time. `pages.yml` declares the artifact as an input only; it returns no outputs, so the caller keeps the artifact it produced and names it again on a later call.
 
 | Input | Effect |
 |---|---|
