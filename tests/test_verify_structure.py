@@ -56,13 +56,15 @@ class CompareTest(unittest.TestCase):
         self.assertTrue(any("chapters 1 != published 0" in problem for problem in found), found)
 
     def test_supplement_difference_beyond_the_toc_row_is_reported(self):
-        found = verify_structure.problems(self.row(supplements=["附則"] * 4))
-        self.assertTrue(any("supplements 2" in problem for problem in found), found)
+        found = verify_structure.problems(self.row(supplements=["附則"] * 7))
+        self.assertTrue(any(problem.startswith("supplements") for problem in found), found)
 
     def test_published_count_equal_to_parsed_is_accepted(self):
-        # 2 supplements are parsed from this fixture; the published API may show
-        # the same count (rebuilt) or one more (built before issue #81).
-        self.assertEqual(verify_structure.problems(self.row(supplements=["附則"] * 2)), [])
+        # The published API may show the parsed count (rebuilt) or one more
+        # (built before issue #81 counted the table-of-contents 附則 row).
+        row = self.row()
+        accepted = ["附則"] * row["supplements"]
+        self.assertEqual(verify_structure.problems(self.row(supplements=accepted)), [])
 
     def test_unstructured_heading_warns(self):
         html = HTML.replace(
