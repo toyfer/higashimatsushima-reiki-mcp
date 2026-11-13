@@ -178,6 +178,7 @@ jobs:
               scripts/parse_honbun.py \
               scripts/search_index.py \
               scripts/build_static_api.py \
+              scripts/daily_check.py \
               scripts/reiki_common.py | grep -q .; then
               echo "mode=full" >> "$GITHUB_OUTPUT"
               echo "skip_sample=false" >> "$GITHUB_OUTPUT"

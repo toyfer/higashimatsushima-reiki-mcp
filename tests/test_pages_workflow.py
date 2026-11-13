@@ -55,6 +55,9 @@ class PagesGuardFailClosedTest(unittest.TestCase):
         self.assertIn("commit_sha", guard)
         self.assertIn("git diff --name-only \"$published_commit\" \"$HEAD_SHA\"", guard)
         self.assertIn("builder or parser changed since the published build; using full build", guard)
+        # The push path filter already covers daily_check.py, so the published
+        # commit comparison must look at it too.
+        self.assertIn("scripts/daily_check.py", guard)
         self.assertIn("git cat-file -e \"${published_commit}^{commit}\"", guard)
 
     def test_build_steps_record_the_commit(self) -> None:
