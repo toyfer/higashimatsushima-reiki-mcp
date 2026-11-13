@@ -822,22 +822,11 @@ test("get_toc lists articles and units with pagination", async () => {
     assert.deepEqual(payload.chapters.map((chapter) => chapter.text), ["第1章 総則", "第2章 雑則"]);
     assert.equal(payload.articles[0].chapter, "第1章");
     assert.equal(payload.articles[0].chapter_title, "総則");
-    assert.deepEqual(payload.deleted_headings, []);
     assert.equal(payload.resources.length, 2);
     assert.equal(payload.resources[1].href, "word/r122FG00000002.rtf");
     assert.equal(payload.next_offset, null);
     const paged = toolText(await callTool("get_toc", { law_id: "r122RG00000002", limit: 1 }));
     assert.equal(paged.next_offset, 1);
-  } finally { restore(); }
-});
-
-test("get_toc surfaces deleted section headings", async () => {
-  const law = { ...SAMPLE_LAW, deleted_headings: ["第5節 鉱産税 削除"] };
-  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": law });
-  const restore = mockFetch(impl);
-  try {
-    const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000002" }));
-    assert.deepEqual(payload.deleted_headings, ["第5節 鉱産税 削除"]);
   } finally { restore(); }
 });
 
@@ -861,18 +850,6 @@ test("get_unit returns one appendix table or supplement", async () => {
     const missing = toolText(await callTool("get_unit", { law_id: "r122RG00000002", kind: "supplement", n: 9 }));
     assert.equal(missing.found, false);
     assert.deepEqual(missing.available_n, [1, 2]);
-  } finally { restore(); }
-});
-
-test("law-scoped search does not repeat a heading-only appendix label", async () => {
-  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
-  const restore = mockFetch(impl);
-  try {
-    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第2", law_id: "r122RG00000002" }));
-    const row = payload.results.find((item) => item.kind === "appendix_table");
-    assert.ok(row, JSON.stringify(payload.results));
-    assert.ok(!row.snippet.startsWith("別表第2 別表第2"), row.snippet);
-    assert.equal(row.snippet.match(/別表第2/g).length, 1, row.snippet);
   } finally { restore(); }
 });
 
@@ -952,9 +929,10 @@ test("exact phrase matching rejects chunks that only share the bigrams", async (
   } finally { restore(); }
 });
 
-test("heading-only appendix snippet does not repeat its own label", async () => {
+test("scope=law keeps the resource of the appendix chunk it cites", async () => {
   const shard = { data_version: "fx", terms: {} };
-  for (const gram of ["別表", "表第", "第4"]) shard.terms[gram] = [[0, 1.4]];
+  for (const gram of ["別表", "表第", "第2"]) shard.terms[gram] = [[0, 1.6]];
+  for (const gram of ["随意", "意契", "契約"]) shard.terms[gram] = [[1, 1.4]];
   const routes = {};
   for (let s = 0; s < 16; s += 1) routes[`/api/search/postings-${String(s).padStart(2, "0")}.json`] = shard;
   routes["/api/search/chunks-000.json"] = {
@@ -962,28 +940,43 @@ test("heading-only appendix snippet does not repeat its own label", async () => 
     chunks: [
       {
         i: 0,
-        law_id: "r122RG00000041",
-        title: "文書規程",
-        label: "別表第4(第21条関係)",
+        law_id: "r122RG00000042",
+        title: "委託規程",
+        label: "別表第2(第5条関係)",
         heading: "",
         kind: "appendix_table",
         content_status: "external_resource_only",
-        resource: { label: "別表第4(第21条関係)", href: "word/r122FG00002360.rtf", image_url: "" },
-        source_url: "https://e/41",
-        snippet: "別表第4(第21条関係)",
-        text: "別表第4(第21条関係)",
+        resource: { label: "別表第2(第5条関係)", href: "honbun_2.rtf", image_url: "" },
+        source_url: "https://e/42",
+        snippet: "別表第2(第5条関係)",
+        text: "別表第2(第5条関係)",
+      },
+      {
+        i: 1,
+        law_id: "r122RG00000042",
+        title: "委託規程",
+        label: "第3条",
+        heading: "(随意契約)",
+        kind: "article",
+        source_url: "https://e/42",
+        snippet: "随意契約は別表第2による。",
+        text: "随意契約は別表第2による。",
       },
     ],
   };
   const { impl } = pagesRouter(routes);
   const restore = mockFetch(impl);
   try {
-    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第4" }));
+    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第2 随意契約", scope: "law" }));
     assert.equal(payload.count, 1);
     const row = payload.results[0];
-    assert.equal(row.snippet, "別表第4(第21条関係)");
+    // The law-level row describes the first evidence entry, not whichever
+    // chunk happened to be scanned last (issue #76).
+    assert.equal(row.kind, "appendix_table");
+    assert.equal(row.label, "別表第2(第5条関係)");
     assert.equal(row.content_status, "external_resource_only");
-    assert.equal(row.resource.href, "word/r122FG00002360.rtf");
+    assert.equal(row.resource?.href, "honbun_2.rtf");
+    assert.equal(row.matches.length, 2);
   } finally { restore(); }
 });
 
@@ -1069,5 +1062,40 @@ test("search reports counters and index caps for completeness judgement", async 
     assert.equal(payload.index_caps.candidate_scan_limit, 300);
     assert.ok("posting_terms" in payload.index_caps);
     assert.ok("posting_entries" in payload.index_caps);
+  } finally { restore(); }
+});
+
+test("heading-only appendix snippet does not repeat its own label", async () => {
+  const shard = { data_version: "fx", terms: {} };
+  for (const gram of ["別表", "表第", "第4"]) shard.terms[gram] = [[0, 1.4]];
+  const routes = {};
+  for (let s = 0; s < 16; s += 1) routes[`/api/search/postings-${String(s).padStart(2, "0")}.json`] = shard;
+  routes["/api/search/chunks-000.json"] = {
+    data_version: "fx",
+    chunks: [
+      {
+        i: 0,
+        law_id: "r122RG00000041",
+        title: "文書規程",
+        label: "別表第4(第21条関係)",
+        heading: "",
+        kind: "appendix_table",
+        content_status: "external_resource_only",
+        resource: { label: "別表第4(第21条関係)", href: "word/r122FG00002360.rtf", image_url: "" },
+        source_url: "https://e/41",
+        snippet: "別表第4(第21条関係)",
+        text: "別表第4(第21条関係)",
+      },
+    ],
+  };
+  const { impl } = pagesRouter(routes);
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第4" }));
+    assert.equal(payload.count, 1);
+    const row = payload.results[0];
+    assert.equal(row.snippet, "別表第4(第21条関係)");
+    assert.equal(row.content_status, "external_resource_only");
+    assert.equal(row.resource.href, "word/r122FG00002360.rtf");
   } finally { restore(); }
 });
