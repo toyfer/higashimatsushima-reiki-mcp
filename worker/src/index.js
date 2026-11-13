@@ -180,7 +180,11 @@ function foldedWordChar(char) {
   const cached = FOLDED_CHAR_CACHE.get(char);
   if (cached !== undefined) return cached;
   const folded = char.normalize("NFKC").toLowerCase();
-  const value = WORD_CHAR_RE.test(folded) ? folded : "";
+  // NFKC expands some symbols into several characters that include punctuation
+  // (㈱ into "(株)", ⒈ into "1."). Keeping the brackets would make the folded
+  // text disagree with searchableText(), which drops every non-word character,
+  // so the exact match would miss (issue #99).
+  const value = WORD_CHAR_RE.test(folded) ? folded.replace(/[^\p{L}\p{N}]/gu, "") : "";
   if (FOLDED_CHAR_CACHE.size >= FOLDED_CHAR_CACHE_LIMIT) FOLDED_CHAR_CACHE.clear();
   FOLDED_CHAR_CACHE.set(char, value);
   return value;
@@ -287,7 +291,15 @@ function unitHaystackText(label, heading, body) {
   // A heading-only appendix table is published with its text equal to its own
   // label, so prefixing the label again puts the same string twice in the
   // snippet. Trim the repeated prefix instead of duplicating it (issue #49).
-  const rest = labelText && bodyText.startsWith(labelText) ? bodyText.slice(labelText.length).trim() : bodyText;
+  let rest = bodyText;
+  if (labelText && bodyText.startsWith(labelText)) {
+    // Only strip the label when it stands on its own: "別表第1" must not swallow
+    // the "0" of "別表第10(第2条関係)" (issue #100).
+    const next = bodyText.slice(labelText.length, labelText.length + 1);
+    if (bodyText.length === labelText.length || !/[\p{L}\p{N}]/u.test(next)) {
+      rest = bodyText.slice(labelText.length).trim();
+    }
+  }
   return `${labelText} ${headingText} ${rest}`.trim();
 }
 

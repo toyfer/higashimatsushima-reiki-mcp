@@ -263,6 +263,50 @@ test("full width digits keep their offsets in the snippet (#78)", async () => {
   } finally { restore(); }
 });
 
+test("NFKC symbols that expand to punctuation still match exactly (#99)", async () => {
+  const chunk = {
+    i: 0,
+    law_id: "r122RG00000053",
+    title: "記号規則",
+    label: "第3条",
+    heading: "",
+    kind: "article",
+    source_url: "https://e/53",
+    snippet: "㈱東松島および⑴号は、⒈の例による。",
+    text: "㈱東松島および⑴号は、⒈の例による。",
+  };
+  const restore = installCustomPages([chunk], ["株東", "東松", "松島", "1号"]);
+  try {
+    for (const [query, expected] of [["㈱東松島", "㈱東松島"], ["株東松島", "㈱東松島"], ["⑴号", "⑴号"], ["1号", "⑴号"]]) {
+      const payload = await callTool("search_laws_by_content", { query, exact: true });
+      assert.equal(payload.count, 1, `${query}: ${JSON.stringify(payload.results)}`);
+      const [highlight] = payload.results[0].highlights;
+      assert.equal(payload.results[0].snippet.slice(highlight.start, highlight.end), expected, query);
+    }
+  } finally { restore(); }
+});
+
+test("a label prefix is only stripped when it ends on a word boundary (#100)", async () => {
+  const chunk = {
+    i: 0,
+    law_id: "r122RG00000054",
+    title: "事務規程",
+    label: "別表第1",
+    heading: "",
+    kind: "appendix_table",
+    source_url: "https://e/54",
+    snippet: "別表第10(第2条関係)",
+    text: "別表第10(第2条関係)",
+  };
+  const restore = installCustomPages([chunk], ["別表", "表第", "第1", "10"]);
+  try {
+    const payload = await callTool("search_laws_by_content", { query: "別表第10" });
+    const row = payload.results[0];
+    assert.ok(row.snippet.includes("別表第10(第2条関係)"), row.snippet);
+    assert.ok(!row.snippet.includes("別表第1 0"), row.snippet);
+  } finally { restore(); }
+});
+
 test("AND query without a common chunk returns counters instead of failing (#67)", async () => {
   const restore = installPages();
   try {

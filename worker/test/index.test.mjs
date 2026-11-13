@@ -820,6 +820,7 @@ test("get_toc lists articles and units with pagination", async () => {
     assert.deepEqual(payload.articles.map((article) => article.label), ["第1条", "第2条"]);
     assert.deepEqual(payload.supplements, ["附則1", "附則2"]);
     assert.deepEqual(payload.chapters.map((chapter) => chapter.text), ["第1章 総則", "第2章 雑則"]);
+    assert.deepEqual(payload.deleted_headings, []);
     assert.equal(payload.articles[0].chapter, "第1章");
     assert.equal(payload.articles[0].chapter_title, "総則");
     assert.equal(payload.resources.length, 2);
@@ -827,6 +828,16 @@ test("get_toc lists articles and units with pagination", async () => {
     assert.equal(payload.next_offset, null);
     const paged = toolText(await callTool("get_toc", { law_id: "r122RG00000002", limit: 1 }));
     assert.equal(paged.next_offset, 1);
+  } finally { restore(); }
+});
+
+test("get_toc surfaces deleted section headings", async () => {
+  const law = { ...SAMPLE_LAW, deleted_headings: ["第5節 鉱産税 削除"] };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": law });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000002" }));
+    assert.deepEqual(payload.deleted_headings, ["第5節 鉱産税 削除"]);
   } finally { restore(); }
 });
 
@@ -850,6 +861,18 @@ test("get_unit returns one appendix table or supplement", async () => {
     const missing = toolText(await callTool("get_unit", { law_id: "r122RG00000002", kind: "supplement", n: 9 }));
     assert.equal(missing.found, false);
     assert.deepEqual(missing.available_n, [1, 2]);
+  } finally { restore(); }
+});
+
+test("law-scoped search does not repeat a heading-only appendix label", async () => {
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第2", law_id: "r122RG00000002" }));
+    const row = payload.results.find((item) => item.kind === "appendix_table");
+    assert.ok(row, JSON.stringify(payload.results));
+    assert.ok(!row.snippet.startsWith("別表第2 別表第2"), row.snippet);
+    assert.equal(row.snippet.match(/別表第2/g).length, 1, row.snippet);
   } finally { restore(); }
 });
 
