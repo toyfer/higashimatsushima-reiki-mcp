@@ -564,7 +564,11 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     body_text = "\n".join(preamble)
     plain_text = "\n".join(lines)
     parse_warnings: list[str] = list(structure_warnings)
-    if not articles and not body_text:
+    # An ordinance can legitimately have no 第N条 in its main body: 抄 versions of
+    # amendment ordinances consist only of 附則, and 別表-only ordinances carry
+    # nothing but appendix tables. Only a law with no structured content at all
+    # is a parse failure (issue #95 follow-up).
+    if not articles and not body_text and not supplements and not appendix_tables:
         parse_warnings.append("no_articles_parsed")
     for parsed_article in articles:
         item_lines = [

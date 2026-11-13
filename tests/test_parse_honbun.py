@@ -575,5 +575,32 @@ class ArticleBranchChainAndSupplementTest(unittest.TestCase):
         self.assertIn("第2条", supplements[0])
 
 
+class SupplementOnlyOrdinanceTest(unittest.TestCase):
+    """A 抄 amendment ordinance carries its whole body inside 附則 (issue #95 follow-up)."""
+
+    FIXTURE = primary_page(
+        "刑法等の一部を改正する法律の施行に伴う関係条例の整理に関する条例　抄",
+        '<div><div class="eline"><p><span>○刑法等の一部を改正する法律の施行に伴う関係条例の整理に関する条例　抄</span></p></div></div>\n'
+        '<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="head"><p><span>条例第1号</span></p></div></div></div>\n'
+        '<div><div class="eline"><p><span><span class="word-space">附</span>則</span></p></div></div>\n'
+        '<div><div class="eline"><div class="head"><p><span>(施行期日)</span></p></div></div></div>\n'
+        '<div><div class="eline"><p><span><span>第1条</span>　<span>この条例は、刑法等の一部を改正する法律の施行の日から施行する。</span></p></div></div></div>\n'
+        '<div><div class="eline"><p><span><span>第2条</span>　<span>この条例の施行に関し必要な経過措置は、市長が定める。</span></p></div></div></div>',
+    )
+
+    def test_supplement_only_law_is_not_flag_for_no_articles(self) -> None:
+        law = parse_honbun(self.FIXTURE, law_id="r122RG00001925", source_url="https://example.test/1925")
+        self.assertEqual(law["article_count"], 0)
+        self.assertEqual(len(law["supplements"]), 1)
+        self.assertIn("第1条", law["supplements"][0])
+        self.assertIn("刑法等の一部を改正する法律", law["supplements"][0])
+        self.assertNotIn("no_articles_parsed", law["parse_warnings"])
+
+    def test_law_without_any_structured_content_is_still_flagged(self) -> None:
+        law = parse_honbun(EMPTY_BODY, law_id="r122RG00000002", source_url="https://example.test/empty")
+        self.assertIn("no_articles_parsed", law["parse_warnings"])
+
+
 if __name__ == "__main__":
     unittest.main()
