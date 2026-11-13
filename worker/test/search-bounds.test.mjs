@@ -199,6 +199,70 @@ test("exact hits stay above approximate ones when exact is false (#79)", async (
   }
 });
 
+function installCustomPages(chunks, grams) {
+  const shard = { data_version: DATA_VERSION, terms: {} };
+  for (const gram of grams) shard.terms[gram] = chunks.map((chunk) => [chunk.i, 1.5]);
+  const manifest = { ...MANIFEST, chunk_count: chunks.length, law_count: chunks.length };
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const { pathname } = new URL(typeof input === "string" ? input : input.url);
+    if (pathname === "/api/search/manifest.json") return json(manifest);
+    if (pathname === "/api/search/title-index.json") return json({ data_version: DATA_VERSION, laws: [] });
+    if (pathname.startsWith("/api/search/postings-")) return json(shard);
+    if (pathname.startsWith("/api/search/chunks-")) return json({ data_version: DATA_VERSION, chunks });
+    return json({ error: "not found" }, 404);
+  };
+  return () => {
+    globalThis.fetch = original;
+  };
+}
+
+test("highlight offsets survive NFKC expansion in the chunk text (#78)", async () => {
+  const chunk = {
+    i: 0,
+    law_id: "r122RG00000051",
+    title: "記号規則",
+    label: "第2条",
+    heading: "",
+    kind: "article",
+    source_url: "https://e/51",
+    snippet: "㍻元年の規定により、第2条 対象とする。",
+    text: "㍻元年の規定により、第2条 対象とする。",
+  };
+  const restore = installCustomPages([chunk], ["第2", "2条"]);
+  try {
+    const payload = await callTool("search_laws_by_content", { query: "第2条" });
+    const row = payload.results[0];
+    assert.equal(row.match_type, "exact");
+    const [highlight] = row.highlights;
+    // ㍻ folds to 平成, so one character becomes two: every following offset must
+    // still point at the right original character.
+    assert.equal(row.snippet.slice(highlight.start, highlight.end), "第2条");
+  } finally { restore(); }
+});
+
+test("full width digits keep their offsets in the snippet (#78)", async () => {
+  const chunk = {
+    i: 0,
+    law_id: "r122RG00000052",
+    title: "交付要綱",
+    label: "第7条",
+    heading: "",
+    kind: "article",
+    source_url: "https://e/52",
+    snippet: "交付額は６００万円とする。",
+    text: "交付額は６００万円とする。",
+  };
+  const restore = installCustomPages([chunk], ["60", "00", "0万", "万円"]);
+  try {
+    const payload = await callTool("search_laws_by_content", { query: "600万円" });
+    const row = payload.results[0];
+    assert.equal(row.match_type, "exact");
+    const [highlight] = row.highlights;
+    assert.equal(row.snippet.slice(highlight.start, highlight.end), "６００万円");
+  } finally { restore(); }
+});
+
 test("AND query without a common chunk returns counters instead of failing (#67)", async () => {
   const restore = installPages();
   try {
