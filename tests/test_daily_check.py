@@ -57,7 +57,8 @@ class FetchTextRetryTest(unittest.TestCase):
             return contextlib.nullcontext(FakeResponse(b"<html>ok</html>"))
 
         daily_check.urllib.request.urlopen = fake_urlopen  # type: ignore[assignment]
-        text, digest = daily_check.fetch_text("https://example.test/menu")
+        with contextlib.redirect_stderr(io.StringIO()):
+            text, digest = daily_check.fetch_text("https://example.test/menu")
         self.assertEqual(text, "<html>ok</html>")
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(self.sleeps), 2)
@@ -302,7 +303,8 @@ class FetchExceptionScopeTest(unittest.TestCase):
 
         daily_check.fetch_text = fake_fetch  # type: ignore[assignment]
         try:
-            result = daily_check.collect_from_taikei(max_pages=5, delay_seconds=0)
+            with contextlib.redirect_stderr(io.StringIO()):
+                result = daily_check.collect_from_taikei(max_pages=5, delay_seconds=0)
         finally:
             daily_check.fetch_text = original  # type: ignore[assignment]
         self.assertEqual(len(result["page_errors"]), 1)

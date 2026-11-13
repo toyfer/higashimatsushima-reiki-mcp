@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import sys
@@ -133,7 +135,8 @@ class FailOnErrorTest(unittest.TestCase):
             builder.fetch_text = fake_fetch  # type: ignore[assignment]
             sys.argv = ["build_static_api.py", "--status", str(status), "--out", str(root / "site"), "--delay", "0"] + (["--fail-on-error"] if fail_on_error else [])
             try:
-                code = builder.main()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    code = builder.main()
                 health_path = root / "site" / "api" / "health.json"
                 health = json.loads(health_path.read_text(encoding="utf-8")) if health_path.exists() else None
                 return code, health
@@ -208,7 +211,8 @@ class ExpectedCountHealthTest(unittest.TestCase):
         ] + list(extra_args or [])
         sys.argv = argv
         try:
-            code = builder.main()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = builder.main()
         finally:
             builder.fetch_text = original_fetch  # type: ignore[assignment]
             builder.parse_honbun = original_parse  # type: ignore[assignment]
@@ -347,7 +351,8 @@ class BlockingWarningBuildTest(unittest.TestCase):
         ] + (["--fail-on-error"] if fail_on_error else [])
         sys.argv = argv
         try:
-            code = builder.main()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = builder.main()
         finally:
             builder.fetch_text = original_fetch  # type: ignore[assignment]
             sys.argv = original_argv
@@ -428,7 +433,8 @@ class PublishedMetadataTest(unittest.TestCase):
             "0",
         ]
         try:
-            code = builder.main()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = builder.main()
         finally:
             builder.fetch_text = original_fetch  # type: ignore[assignment]
             sys.argv = original_argv
