@@ -166,6 +166,25 @@ jobs:
           echo "Published law_count: $published_count ($published_detail)"
           echo "published_count=$published_count" >> "$GITHUB_OUTPUT"
           echo "published_ok=$published_ok" >> "$GITHUB_OUTPUT"
+          # Issue #74: the pushed diff alone cannot prove the published API is
+          # current. When an earlier push in the same batch was cancelled, the
+          # later docs-only push would find no builder change in its own diff and
+          # skip, leaving parser fixes unpublished. Compare against the commit
+          # that produced the published build instead.
+          published_commit=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('commit_sha') or '')" "$health_json")
+          echo "published_commit=${published_commit:-unknown}"
+          if [ "$EVENT_NAME" = "push" ] && [ -n "$published_commit" ] && git cat-file -e "${published_commit}^{commit}" 2>/dev/null; then
+            if git diff --name-only "$published_commit" "$HEAD_SHA" -- \
+              scripts/parse_honbun.py \
+              scripts/search_index.py \
+              scripts/build_static_api.py \
+              scripts/reiki_common.py | grep -q .; then
+              echo "mode=full" >> "$GITHUB_OUTPUT"
+              echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+              echo "builder or parser changed since the published build; using full build"
+              exit 0
+            fi
+          fi
           if [ "$published_count" -gt 5 ]; then
             if { [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "workflow_call" ]; } && [ "$ALLOW_SAMPLE_OVERWRITE" = "true" ]; then
               echo "::warning::Published API already has $published_count laws. allow_sample_overwrite=true was set explicitly, so this manual sample run will overwrite it with 5 laws."
@@ -209,12 +228,14 @@ jobs:
           # push and schedule events have no inputs, so the fallback is required
           # or the empty string reaches --delay and the script exits at once.
           BUILD_DELAY: ${{ inputs.delay_seconds || '0.35' }}
+          BUILD_COMMIT: ${{ github.sha }}
         run: python scripts/build_static_api.py --delay "$BUILD_DELAY" --fail-on-error
 
       - name: Build sample static API
         if: steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true'
         env:
           BUILD_DELAY: ${{ inputs.delay_seconds || '0.35' }}
+          BUILD_COMMIT: ${{ github.sha }}
         run: python scripts/build_static_api.py --limit 5 --delay "$BUILD_DELAY"
 
       - name: Skip deployment notice

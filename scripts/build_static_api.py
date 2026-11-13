@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -173,6 +174,10 @@ def main() -> int:
     laws_dir.mkdir(parents=True, exist_ok=True)
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    # The commit that produced this build. The Pages guard compares it with
+    # HEAD so a parser change cannot be lost when the run that carried it is
+    # cancelled by a later push (issue #74).
+    commit_sha = os.environ.get("BUILD_COMMIT", "").strip()
     selected_count = len(laws)
     is_full_build = not args.limit and not args.only_id
     # Compute the version before writing anything so every law file can carry the
@@ -257,6 +262,7 @@ def main() -> int:
         "law_count": len(index),
         "failure_count": len(failures),
         "failures": failures,
+        "commit_sha": commit_sha,
     }
     meta["selected_count"] = selected_count
     meta["expected_count"] = total_count
@@ -305,6 +311,7 @@ def main() -> int:
         "validation_problems": validation_problems,
         "data_version": version,
         "search_chunk_count": search_manifest.get("chunk_count", 0),
+        "commit_sha": commit_sha,
     }
     dump_json(api_root / "health.json", health)
     meta["search_chunk_count"] = search_manifest.get("chunk_count", 0)

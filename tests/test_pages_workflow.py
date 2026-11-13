@@ -49,6 +49,22 @@ class PagesGuardFailClosedTest(unittest.TestCase):
     def test_pages_rebuilds_search_index_when_builder_changes(self) -> None:
         self.assertIn("'scripts/search_index.py'", self.pages)
 
+    def test_guard_compares_against_the_published_commit(self) -> None:
+        guard = self.pages.split("Guard against sample downgrade of a full deployment", 1)[1].split("- name: Check whether", 1)[0]
+        # Issue #74: a cancelled earlier push must not hide its parser change.
+        self.assertIn("commit_sha", guard)
+        self.assertIn("git diff --name-only \"$published_commit\" \"$HEAD_SHA\"", guard)
+        self.assertIn("builder or parser changed since the published build; using full build", guard)
+        self.assertIn("git cat-file -e \"${published_commit}^{commit}\"", guard)
+
+    def test_build_steps_record_the_commit(self) -> None:
+        self.assertIn("BUILD_COMMIT: ${{ github.sha }}", self.pages)
+        self.assertEqual(self.pages.count("BUILD_COMMIT: ${{ github.sha }}"), 2)
+
+    def test_guard_still_fails_closed_on_an_unreadable_health_file(self) -> None:
+        guard = self.pages.split("Guard against sample downgrade of a full deployment", 1)[1].split("- name: Check whether", 1)[0]
+        self.assertEqual(guard.count("exit 1"), 2)
+
 
 class PullRequestTestWorkflowTest(unittest.TestCase):
     @classmethod
