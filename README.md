@@ -105,6 +105,7 @@ python3 scripts/daily_check.py --mode check
 python3 scripts/build_static_api.py --limit 5 --delay 0.1
 python3 scripts/build_static_api.py --only-id r122RG00000002 --delay 0.1
 python3 scripts/measure_search_index.py
+python3 tools/verify_structure.py --sample 10
 ```
 
 ## Files
@@ -118,6 +119,7 @@ python3 scripts/measure_search_index.py
 | `scripts/build_static_api.py` | Static API builder writing under `site/api/` |
 | `scripts/search_index.py` | Bigram TF-IDF body-search index builder |
 | `scripts/measure_search_index.py` | Local / CI measurement of search index build cost and size |
+| `tools/verify_structure.py` | Re-parses sampled ordinances and diffs article, chapter and supplement counts against the published API |
 | `data/status/latest.json` | Last known menu hash, site current date and ordinance URL list |
 | `site/index.html` | Human-readable entry page for the static API |
 | `worker/src/index.js` | Stateless MCP Worker over the published static API |
