@@ -28,6 +28,19 @@ The weekly run is `17 19 * * 6` in UTC, which is Sunday 04:17 JST, one hour afte
 
 A push that only refreshes `data/status/latest.json` still takes the 5-ordinance sample path.
 
+### Index handoff between workflows
+
+`daily-reiki-check.yml` publishes the check status and does not touch the published index. When it asks `pages.yml` for a full build it passes `status_artifact`, and `pages.yml` downloads that artifact in the build job instead of crawling the status a second time. The workflow also returns `status_artifact` as an output, so a caller can chain the artifact it just produced.
+
+| Input | Effect |
+|---|---|
+| `full_build` | `true` forces the full build even when the guard sees no script change |
+| `allow_sample_overwrite` | `true` lets a 5-ordinance sample replace a larger published API |
+| `delay_seconds` | Per-page crawl delay, `0.35` by default |
+| `status_artifact` | Artifact name carrying `status/latest.json`; when set, the build job skips its own collection step |
+
+Merging several pull requests in quick succession can still leave the published API stale: the run for the intermediate push is dropped by the `github-pages` concurrency group and the run for the last push may skip because its diff only touched documentation. After a batch of merges, dispatch `pages.yml` with `full_build=true` and confirm that `api/health.json` reports a new `data_version`.
+
 ### Sample downgrade guard
 
 The 5-ordinance sample is only safe while nothing larger is published. Before building, the guard step reads the published `api/health.json` with a per-run cache buster and `Cache-Control: no-cache`, so a CDN copy from before the last full deployment cannot be mistaken for the current state.

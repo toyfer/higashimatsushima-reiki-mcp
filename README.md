@@ -30,9 +30,17 @@ After a full build and Pages deploy, the public endpoints are:
 | `api/search/manifest.json` | Keyword body-search index manifest: `bigram-tfidf`, counts and shard files |
 | `api/search/chunks-*.json` | Body-search chunks with title, article label, snippet and `source_url` |
 | `api/search/postings-*.json` | Bigram TF-IDF postings sharded by term hash |
-| `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables, history, plus `content_current_date` and `data_version` |
+| `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables, `appendix_styles`, `resources`, `appendix_table_resource_index`, history, plus `content_current_date` and `data_version` |
 
 Example law IDs look like `r122RG00000002`.
+
+### Appendix tables and their resources
+
+`resources` is one array that mixes appendix tables and 様式 (style) documents, and the two do not share an order. `appendix_table_resource_index` maps a table's position in `appendix_tables` to its entry in `resources`: `appendix_table_resource_index[0] === 2` means the first appendix table's RTF or thumbnail is `resources[2]`. A table with no external document has `null` there, and the Worker returns `resource: null` instead of borrowing a neighbouring style document (issue #61).
+
+Each `resources[]` entry carries `kind` (`appendix` or `form`), `table_number`, `table_branch` (the 枝番 of `別表第2の3`, otherwise `null`) and `seq`. The Worker relies only on `appendix_table_resource_index`, so an older JSON without the mapping still resolves through the positional lookup.
+
+`appendix_styles` holds the 様式 sections as text, so a style document no longer enters `appendix_tables` as a heading-only table. A heading-only table whose body lives in RTF or PNG is published with `content_status: external_resource_only` and its `resource`, which is how a missing body stays visible instead of being presented as complete text.
 
 ### Body search index
 
@@ -45,10 +53,14 @@ Example law IDs look like `r122RG00000002`.
 | `posting_shards` | Number of posting files, sharded by a hash of the term |
 | `max_postings_per_term` | 50 |
 | `max_postings_per_law_per_term` | 3 |
+| `external_resource_chunks` | Chunks whose body is a heading-only appendix table whose text lives in an RTF or PNG resource |
+| `external_resource_chars` | Searchable terms those chunks contribute |
 
 Search runs in two stages: postings generate candidates, then each candidate chunk is verified against its full text, which the chunk shard carries as `text`. The verification step is what stops `600点` + `500万円` from satisfying `600万円`, since the four bigrams match without the phrase. `exact: false` keeps those bigram-only hits and labels them `approximate`.
 
 `operator` (`AND`/`OR`) and `scope` (`chunk`/`law`) are explicit: `scope=chunk` requires every term in one chunk, `scope=law` accepts every term somewhere in one ordinance and returns `matches[]` with the evidence chunk per term. Results include `match_type`, `matched_terms`, `unmatched_terms`, and a `snippet` with `highlights`.
+
+Every chunk carries `content_status` (`complete` or `external_resource_only`), and results echo it together with `resource` when an appendix table has an external document. A heading-only table is therefore never returned as if its body had been parsed.
 
 Within one call the Worker spends at most 46 Pages fetches and 300 examined candidates, and the index truncates each term to 50 postings (3 per law per term). Responses report `completeness` (`complete`/`partial`), `filtered_out_exact`, `filtered_out_no_term`, `skipped_per_law`, `truncation_reasons` and `index_caps`, so "no such term" is distinguishable from "a cap was reached".
 
