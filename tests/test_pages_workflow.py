@@ -102,3 +102,23 @@ class PullRequestTestWorkflowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PagesTriggerRobustnessTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pages = read(PAGES)
+        cls.daily = read(ROOT / ".github" / "workflows" / "daily-reiki-check.yml")
+
+    def test_every_event_gets_a_numeric_delay(self) -> None:
+        self.assertIn("BUILD_DELAY: ${{ inputs.delay_seconds || '0.35' }}", self.pages)
+        self.assertNotIn("BUILD_DELAY: ${{ inputs.delay_seconds }}\n", self.pages)
+
+    def test_history_is_deep_enough_to_diff_a_merged_pull_request(self) -> None:
+        self.assertIn("fetch-depth: 0", self.pages)
+
+    def test_daily_check_hands_its_status_to_the_build(self) -> None:
+        self.assertIn("status_artifact:", self.pages)
+        self.assertIn("name: ${{ inputs.status_artifact }}", self.pages)
+        self.assertIn("inputs.status_artifact == ''", self.pages)
+        self.assertIn("status_artifact: reiki-status-${{ github.run_id }}", self.daily)

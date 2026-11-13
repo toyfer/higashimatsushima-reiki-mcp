@@ -21,6 +21,11 @@ USER_AGENT = "higashimatsushima-reiki-mcp/0.1 (+daily public-page change check)"
 CURRENT_RE = re.compile(r"内容現在\s*（?([^\s<）)]+(?:年|/)[^\s<）)]*)")
 HONBUN_RE = re.compile(r"reiki_honbun/(r\d+RG\d+\.html)", re.IGNORECASE)
 TAIKEI_PAGE_RE = re.compile(r"r_taikei_[0-9_]+\.html$", re.IGNORECASE)
+# Issue #66: a single timeout or 5xx aborted a whole full build under
+# --fail-on-error. Retry transient failures with exponential backoff instead.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 1.0
+RETRYABLE_STATUS = {500, 502, 503, 504}
 
 
 class LinkParser(HTMLParser):
@@ -47,14 +52,35 @@ class LinkParser(HTMLParser):
             self._text = []
 
 
+def is_retryable(exc: BaseException) -> bool:
+    """A transient failure worth another attempt; 4xx is not."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRYABLE_STATUS
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError))
+
+
 def fetch_text(url: str, timeout: int = 30) -> tuple[str, str]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        raw = res.read()
-        charset = res.headers.get_content_charset() or "utf-8"
-    text = raw.decode(charset, errors="replace")
-    digest = hashlib.sha256(raw).hexdigest()
-    return text, digest
+    last_error: BaseException | None = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                raw = res.read()
+                charset = res.headers.get_content_charset() or "utf-8"
+            text = raw.decode(charset, errors="replace")
+            digest = hashlib.sha256(raw).hexdigest()
+            return text, digest
+        except BaseException as exc:  # noqa: BLE001 - re-raised below when not retryable
+            last_error = exc
+            if not is_retryable(exc) or attempt == RETRY_ATTEMPTS - 1:
+                raise
+            wait = RETRY_BACKOFF_SECONDS * (2**attempt)
+            print(
+                f"WARN: retrying {url} in {wait:g}s after {exc!r} (attempt {attempt + 1}/{RETRY_ATTEMPTS})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+    raise last_error  # pragma: no cover - the loop always returns or raises
 
 
 def extract_current_date(html: str) -> str:
