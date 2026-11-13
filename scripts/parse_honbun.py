@@ -57,8 +57,14 @@ APPENDIX_TITLE_HINT_RE = re.compile(r"^別表[0-9０-９第\(（]")
 # 様式第N号 sections are separate forms, not a continuation of the table that
 # happens to precede them (issue #61). Anchored on the 号 or an opening paren so
 # ordinary prose such as 様式は… stays body text.
-STYLE_SECTION_RE = re.compile(r"^様式(?:第?[0-9０-９]+号|[\(（])")
-APPENDIX_NUMBER_RE = re.compile(r"^別表(?:第)?([0-9０-９]+)")
+# 様式第1号により… wrapped to the start of a line is prose, not a heading, so
+# the pattern only fires when the 号 is followed by the end of the line, a
+# space, or an opening paren.
+STYLE_SECTION_RE = re.compile(r"^様式(?:第?[0-9０-９]+号(?:の[0-9０-９]+)?(?=\s|[\(（]|$)|[\(（])")
+# 別表第1―1 and 別表第1の1 are sub-tables of 別表第1, so the branch number is
+# part of the identity: matching only the main number made every branch collide
+# with its parent (issue #61 review).
+APPENDIX_NUMBER_RE = re.compile(r"^別表(?:第)?([0-9０-９]+)(?:(?:の|[-－―‐‑])([0-9０-９]+))?")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
 ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
@@ -69,7 +75,7 @@ DATE_NUMBER_SPLIT_RE = re.compile(r"^(.*?)\s+(.+)$")
 # while also disappearing from the amended article's text (issue #61).
 # The city site abbreviates eras (令8, 平30, 昭62), so both the short and the
 # full form must be accepted.
-AMENDMENT_ERA_RE = re.compile(r"^[\(（](?:明治|大正|昭和|昭|平成|平|令和|令)\s*(?:[0-9０-９]+|元)")
+AMENDMENT_ERA_RE = re.compile(r"^[\(（](?:明治|明|大正|大|昭和|昭|平成|平|令和|令)\s*(?:[0-9０-９]+|元)")
 AMENDMENT_WORD_RE = re.compile(r"(?:一部改正|全部改正|全改|改正|改定|追加|削除|新旧対照)")
 AMENDMENT_NUMBER_RE = re.compile(r"第[0-9０-９]+号[\)）]$")
 
@@ -89,11 +95,27 @@ def is_amendment_note(line: str) -> bool:
     return bool(AMENDMENT_NUMBER_RE.search(line))
 
 
-def appendix_table_number(label: str) -> int | None:
+def appendix_table_key(label: str) -> tuple[int, int] | None:
+    """Identify an appendix table as (main number, branch number).
+
+    The branch is 0 for 別表第1, 1 for 別表第1―1 and 別表第1の1, so a sub-table
+    can never be confused with its parent or with another parent's child.
+    """
     match = APPENDIX_NUMBER_RE.match(str(label or "").strip())
     if not match:
         return None
-    return to_int(match.group(1))
+    branch = to_int(match.group(2)) if match.group(2) else 0
+    return (to_int(match.group(1)), branch)
+
+
+def appendix_table_number(label: str) -> int | None:
+    key = appendix_table_key(label)
+    return key[0] if key else None
+
+
+def appendix_table_branch(label: str) -> int | None:
+    key = appendix_table_key(label)
+    return key[1] if key else None
 
 
 def clean_title(value: str) -> str:
@@ -184,6 +206,7 @@ def parse_resources(scope: str, source_url: str) -> list[dict[str, Any]]:
                 "label": label,
                 "kind": kind,
                 "table_number": appendix_table_number(label) if kind == "appendix" else None,
+                "table_branch": appendix_table_branch(label) if kind == "appendix" else None,
                 "seq": position,
                 "href": href,
                 "image_url": image,
@@ -198,20 +221,27 @@ def build_resource_map(appendix_tables: list[str], resources: list[dict[str, Any
 
     ``law.resources[n - 1]`` assumed the two lists line up in length and order,
     which breaks as soon as HTML tables and form_section (RTF/PNG) tables are
-    mixed in one ordinance (issue #61). Match by 別表 number instead and leave
-    the entry null when no resource claims that table.
+    mixed in one ordinance (issue #61). Match on the full 別表 key, branch
+    number included, and let an unnumbered 別表 take the next unclaimed
+    appendix resource in document order. Anything left over stays null.
     """
-    by_number: dict[int, int] = {}
+    by_key: dict[tuple[int, int], int] = {}
+    unnumbered: list[int] = []
     for position, resource in enumerate(resources):
         if resource.get("kind") != "appendix":
             continue
-        number = resource.get("table_number")
-        if isinstance(number, int) and number not in by_number:
-            by_number[number] = position
+        key = appendix_table_key(str(resource.get("label") or ""))
+        if key is None:
+            unnumbered.append(position)
+        elif key not in by_key:
+            by_key[key] = position
     mapping: list[int | None] = []
     for table in appendix_tables:
-        number = appendix_table_number(table)
-        mapping.append(by_number.get(number) if number is not None else None)
+        key = appendix_table_key(table)
+        if key is not None:
+            mapping.append(by_key.get(key))
+            continue
+        mapping.append(unnumbered.pop(0) if unnumbered else None)
     return mapping
 
 
@@ -488,11 +518,11 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             )
     # Appendix tables that have a downloadable RTF/PNG but no body text are
     # not silently published as complete tables (issue #51).
-    appendix_only_headings = [
-        table for table in appendix_tables if "\n" not in table.strip()
-    ]
-    if resources and appendix_only_headings:
-        for table in appendix_only_headings:
+    # Decided from the resolved mapping, not from "resources exist": a law whose
+    # only resources are 様式 must not flag a one-line table heading that has no
+    # file of its own (issue #61 review).
+    for table, resource_index in zip(appendix_tables, build_resource_map(appendix_tables, resources)):
+        if resource_index is not None and "\n" not in table.strip():
             parse_warnings.append(f"external_resource_only:{table[:30]}")
     history = parse_history(html)
     if not history and history_scope(html) is not None:
