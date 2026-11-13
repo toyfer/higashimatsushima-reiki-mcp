@@ -38,7 +38,7 @@ Example law IDs look like `r122RG00000002`.
 
 `resources` is one array that mixes appendix tables and 様式 (style) documents, and the two do not share an order. `appendix_table_resource_index` maps a table's position in `appendix_tables` to its entry in `resources`: `appendix_table_resource_index[0] === 2` means the first appendix table's RTF or thumbnail is `resources[2]`. A table with no external document has `null` there, and the Worker returns `resource: null` instead of borrowing a neighbouring style document (issue #61).
 
-Each `resources[]` entry carries `kind` (`appendix` or `form`), `table_number`, `table_branch` (the 枝番 of `別表第2の3`, otherwise `null`) and `seq`. The Worker relies only on `appendix_table_resource_index`, so an older JSON without the mapping still resolves through the positional lookup.
+Each `resources[]` entry carries `kind` (`appendix` or `form`), `table_number`, `table_branch` and `seq`. `table_branch` is the 枝番 of `別表第2の3`, `0` for a numbered table that has no branch, and `null` for a 様式 or an unnumbered `別表(第2条関係)`. The Worker relies only on `appendix_table_resource_index`, so an older JSON without the mapping still resolves through the positional lookup.
 
 `appendix_styles` holds the 様式 sections as text, so a style document no longer enters `appendix_tables` as a heading-only table. A heading-only table whose body lives in RTF or PNG is published with `content_status: external_resource_only` and its `resource`, which is how a missing body stays visible instead of being presented as complete text.
 
@@ -54,7 +54,7 @@ Each `resources[]` entry carries `kind` (`appendix` or `form`), `table_number`, 
 | `max_postings_per_term` | 50 |
 | `max_postings_per_law_per_term` | 3 |
 | `external_resource_chunks` | Chunks whose body is a heading-only appendix table whose text lives in an RTF or PNG resource |
-| `external_resource_chars` | Searchable terms those chunks contribute |
+| `external_resource_chars` | Characters of `search_text` in those chunks |
 
 Search runs in two stages: postings generate candidates, then each candidate chunk is verified against its full text, which the chunk shard carries as `text`. The verification step is what stops `600点` + `500万円` from satisfying `600万円`, since the four bigrams match without the phrase. `exact: false` keeps those bigram-only hits and labels them `approximate`.
 
