@@ -50,7 +50,7 @@ Search runs in two stages: postings generate candidates, then each candidate chu
 
 `operator` (`AND`/`OR`) and `scope` (`chunk`/`law`) are explicit: `scope=chunk` requires every term in one chunk, `scope=law` accepts every term somewhere in one ordinance and returns `matches[]` with the evidence chunk per term. Results include `match_type`, `matched_terms`, `unmatched_terms`, and a `snippet` with `highlights`.
 
-Within one call the Worker spends at most 40 Pages fetches and 300 examined candidates, and the index truncates each term to 50 postings (3 per law per term). Responses report `completeness` (`complete`/`partial`), `filtered_out_exact`, `filtered_out_no_term`, `skipped_per_law`, `truncation_reasons` and `index_caps`, so "no such term" is distinguishable from "a cap was reached".
+Within one call the Worker spends at most 46 Pages fetches and 300 examined candidates, and the index truncates each term to 50 postings (3 per law per term). Responses report `completeness` (`complete`/`partial`), `filtered_out_exact`, `filtered_out_no_term`, `skipped_per_law`, `truncation_reasons` and `index_caps`, so "no such term" is distinguishable from "a cap was reached".
 
 Measured index size with full chunk text: 57 shards, 32.4 MiB, largest shard 823 KiB (chunk), 632 KiB (posting) for 20,442 chunks.
 

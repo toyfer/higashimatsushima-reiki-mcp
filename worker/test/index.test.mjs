@@ -935,7 +935,13 @@ test("exact:false keeps bigram-only candidates and labels them approximate", asy
   try {
     const payload = toolText(await callTool("search_laws_by_content", { query: "600万円", exact: false }));
     assert.equal(payload.count, 3);
-    assert.ok(payload.results.every((row) => row.match_type === "approximate"));
+    // A contiguous hit stays exact; only the bigram-only chunk is approximate.
+    const byLaw = Object.fromEntries(payload.results.map((row) => [row.law_id, row.match_type]));
+    assert.deepEqual(byLaw, {
+      r122RG00000031: "approximate",
+      r122RG00000032: "exact",
+      r122RG00000034: "exact",
+    });
   } finally { restore(); }
 });
 

@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "node --check src/index.js",
-    "test": "node --test test/index.test.mjs"
+    "test": "node --test test/index.test.mjs test/search-bounds.test.mjs test/appendix-resource.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.158.0"

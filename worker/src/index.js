@@ -12,6 +12,9 @@ const MAX_CANDIDATES_WALKED = 300;
 const MAX_POSTING_SHARDS = 10;
 const MIN_QUERY_CHARS = 2;
 const SNIPPET_CHARS = 280;
+const SNIPPET_WINDOW = SNIPPET_CHARS;
+const MIN_SNIPPET_CHARS = 80;
+const MAX_SNIPPET_CHARS = 800;
 
 class ProtocolError extends Error {
   constructor(code, message) {
@@ -156,9 +159,6 @@ function searchBigrams(value) {
   return grams;
 }
 
-
-const SNIPPET_WINDOW = 220;
-
 function parseSearchTerms(query) {
   return String(query || "")
     .split(/\s+/)
@@ -184,11 +184,68 @@ function normalizeWithMap(text) {
   return { original, normalized, map };
 }
 
-function firstPhraseMatch(haystack, termNormalized) {
-  if (!haystack || !termNormalized) return { found: false, start: -1, end: -1 };
-  const start = haystack.normalized.indexOf(termNormalized);
-  if (start < 0) return { found: false, start: -1, end: -1 };
-  return { found: true, start, end: start + termNormalized.length };
+const DIGIT_RE = /[0-9]/;
+
+// "600万円" must not match inside "3,600万円" (issue #62). The compact search
+// text drops punctuation, so the digit chain has to be judged on the original
+// characters, allowing one thousands separator to stay inside the number.
+function gluedToNumberLeft(original, startIndex) {
+  let index = startIndex - 1;
+  let separators = 0;
+  while (index >= 0 && separators <= 1) {
+    const folded = original[index].normalize("NFKC");
+    if (folded === "," || folded === ".") {
+      separators += 1;
+      index -= 1;
+      continue;
+    }
+    return DIGIT_RE.test(folded);
+  }
+  return false;
+}
+
+function gluedToNumberRight(original, endIndex) {
+  let index = endIndex;
+  let separators = 0;
+  while (index < original.length && separators <= 1) {
+    const folded = original[index].normalize("NFKC");
+    if (folded === "," || folded === ".") {
+      separators += 1;
+      index += 1;
+      continue;
+    }
+    return DIGIT_RE.test(folded);
+  }
+  return false;
+}
+
+function numericBoundaryOk(original, startOrig, endOrig, termNormalized) {
+  if (!original) return true;
+  if (DIGIT_RE.test(termNormalized[0] || "") && gluedToNumberLeft(original, startOrig)) return false;
+  if (DIGIT_RE.test(termNormalized[termNormalized.length - 1] || "") && gluedToNumberRight(original, endOrig)) return false;
+  return true;
+}
+
+function phraseMatchIn(haystack, termNormalized) {
+  if (!haystack || !termNormalized) return { found: false, start: -1, end: -1, boundaryRejected: false };
+  const compact = haystack.normalized;
+  let from = 0;
+  let boundaryRejected = false;
+  while (from + termNormalized.length <= compact.length) {
+    const start = compact.indexOf(termNormalized, from);
+    if (start < 0) break;
+    const end = start + termNormalized.length;
+    const startOrig = haystack.map[start];
+    const endOrig = (haystack.map[end - 1] ?? startOrig) + 1;
+    if (numericBoundaryOk(haystack.original, startOrig, endOrig, termNormalized)) {
+      return { found: true, start, end, boundaryRejected: false };
+    }
+    // The characters are there but the term sits inside a larger number
+    // (3,600万円 for 600万円), which matters for the exact:false counters.
+    boundaryRejected = true;
+    from = start + 1;
+  }
+  return { found: false, start: -1, end: -1, boundaryRejected };
 }
 
 function bestWindowStart(originals, size) {
@@ -336,11 +393,10 @@ function lawUnits(law) {
     });
   });
   const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
-  const resources = Array.isArray(law.resources) ? law.resources : [];
   tables.forEach((table, position) => {
     const text = String(table || "");
     const firstLine = text.split("\n")[0].trim();
-    const resource = resources[position] || null;
+    const resource = appendixResource(law, position);
     units.push({
       kind: "appendix_table",
       label: (firstLine || `別表${position + 1}`).slice(0, 40),
@@ -352,6 +408,19 @@ function lawUnits(law) {
     });
   });
   return units;
+}
+
+function appendixResource(law, position) {
+  const resources = Array.isArray(law.resources) ? law.resources : [];
+  const mapping = Array.isArray(law.appendix_table_resource_index) ? law.appendix_table_resource_index : null;
+  if (mapping) {
+    const index = mapping[position];
+    if (Number.isInteger(index) && index >= 0 && index < resources.length) {
+      return resources[index] || null;
+    }
+    return null;
+  }
+  return resources[position] || null;
 }
 
 function unitId(lawId, unit) {
@@ -444,7 +513,22 @@ async function callTool(env, name, args) {
     const paragraphWanted = toPositiveInt(input.paragraph);
     const itemWanted = toPositiveInt(input.item);
     if (paragraphWanted === null) {
-      return textResult(JSON.stringify({ law_id: lawId, title: law.title, articles: found }, null, 2));
+      return textResult(
+        JSON.stringify(
+          {
+            law_id: lawId,
+            title: law.title,
+            data_version: law.data_version || "",
+            content_current_date: law.content_current_date || "",
+            article_label: label,
+            heading: article.heading || "",
+            found: true,
+            articles: found,
+          },
+          null,
+          2
+        )
+      );
     }
     const paragraphs = Array.isArray(article.paragraphs) ? article.paragraphs : [];
     const paragraph = paragraphs.find((entry) => Number(entry.number) === paragraphWanted);
@@ -606,7 +690,7 @@ async function callTool(env, name, args) {
     }
     const text = String(units[n - 1] || "");
     const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
-    const unitResource = kind === "appendix_table" && Array.isArray(law.resources) ? law.resources[n - 1] || null : null;
+    const unitResource = kind === "appendix_table" ? appendixResource(law, n - 1) : null;
     const contentStatus = kind === "appendix_table" && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
     return textResult(
       JSON.stringify(
@@ -648,6 +732,7 @@ async function callTool(env, name, args) {
     const scope = rawScope === "law" ? "law" : "chunk";
     const groupBy = scope === "law" ? "law" : String(input.group_by || "chunk").toLowerCase() === "law" ? "law" : "chunk";
     const exact = input.exact === undefined ? true : input.exact !== false && String(input.exact) !== "false";
+    const snippetWindow = Math.min(Math.max(Number(input.snippet_chars) || SNIPPET_WINDOW, MIN_SNIPPET_CHARS), MAX_SNIPPET_CHARS);
     const scopedLawId =
       input.law_id === undefined || input.law_id === null || String(input.law_id).trim() === ""
         ? ""
@@ -678,56 +763,125 @@ async function callTool(env, name, args) {
       const units = lawUnits(law);
       const examined = units.map((unit) => {
         const haystack = normalizeWithMap(`${unit.label} ${unit.heading} ${unit.text}`);
-        const matches = terms
-          .map((term) => ({ term: term.raw, ...firstPhraseMatch(haystack, term.normalized) }))
-          .filter((entry) => entry.found);
-        return { unit, haystack, matches };
+        const matches = terms.map((term) => {
+          const phrase = phraseMatchIn(haystack, term.normalized);
+          if (phrase.found) return { term: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
+          if (exact) {
+            return {
+              term: term.raw,
+              found: false,
+              approximate: false,
+              start: -1,
+              end: -1,
+              boundaryRejected: Boolean(phrase.boundaryRejected),
+            };
+          }
+          const loose = haystack.normalized.indexOf(term.normalized);
+          if (loose >= 0) return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+          const gramsOk = term.bigrams.length > 0 && term.bigrams.every((gram) => haystack.normalized.includes(gram));
+          return { term: term.raw, found: gramsOk, approximate: true, start: -1, end: -1 };
+        });
+        return { unit, haystack, matches, matched: matches.filter((entry) => entry.found) };
       });
-      const qualifies = examined.filter((entry) =>
-        operator === "AND" ? entry.matches.length === terms.length : entry.matches.length > 0
-      );
-      const filteredOutExact = examined.length - qualifies.length;
-      const scored = qualifies
-        .map((entry) => ({ entry, score: scoreUnit(entry.unit.text, terms.flatMap((term) => term.bigrams)) }))
-        .sort((a, b) => b.score - a.score || a.entry.unit.label.localeCompare(b.entry.unit.label));
-      const truncated = scored.length > limit;
-      const results = scored.slice(0, limit).map(({ entry, score }) => {
-        const window = buildSearchWindow(
-          entry.haystack,
-          entry.matches.map((match) => ({
-            term: match.term,
-            startOrig: match.found ? entry.haystack.map[match.start] : -1,
-            endOrig: match.found ? (entry.haystack.map[match.end - 1] ?? -1) + 1 : -1,
-            approximate: Boolean(match.approximate),
-          })),
-          SNIPPET_WINDOW
-        );
-        return {
-          law_id: law.id,
-          title: law.title,
-          label: entry.unit.label,
-          heading: entry.unit.heading || "",
-          kind: entry.unit.kind,
-          unit_index: entry.unit.unitIndex,
-          unit_id: unitId(law.id, entry.unit),
-          snippet: window.snippet,
-          highlights: window.highlights,
-          source_url: law.source_url || "",
-          score,
-          match_type: exact ? "exact" : "approximate",
-          content_status: entry.unit.content_status || "complete",
-          resource: entry.unit.resource || null,
-          matched_terms: entry.matches.map((match) => match.term),
-          unmatched_terms: terms.map((term) => term.raw).filter((raw) => !entry.matches.some((match) => match.term === raw)),
-        };
+      const windowMatch = (entry, match) => ({
+        term: match.term,
+        startOrig: entry.haystack.map[match.start] ?? -1,
+        endOrig: match.start >= 0 ? (entry.haystack.map[match.end - 1] ?? match.start) + 1 : -1,
+        approximate: Boolean(match.approximate),
       });
+      let filteredOutExact = 0;
+      let filteredOutNoTerm = 0;
+      let truncated = false;
+      let results = [];
+      if (scope === "law") {
+        const evidence = new Map();
+        for (const entry of examined) {
+          for (const match of entry.matched) {
+            if (evidence.has(match.term)) continue;
+            const window = buildSearchWindow(entry.haystack, [windowMatch(entry, match)], snippetWindow);
+            evidence.set(match.term, {
+              term: match.term,
+              label: entry.unit.label,
+              heading: entry.unit.heading || "",
+              kind: entry.unit.kind,
+              unit_id: unitId(law.id, entry.unit),
+              snippet: window.snippet,
+              highlights: window.highlights,
+              match_type: match.approximate ? "approximate" : "exact",
+              content_status: entry.unit.content_status || "complete",
+            });
+          }
+        }
+        const evidenceList = [...evidence.values()];
+        const first = evidenceList[0] || null;
+        const satisfied = operator === "AND" ? terms.every((term) => evidence.has(term.raw)) : evidence.size > 0;
+        if (satisfied && first) {
+          results = [
+            {
+              law_id: law.id,
+              title: law.title,
+              label: first.label,
+              heading: first.heading,
+              kind: first.kind,
+              unit_id: first.unit_id,
+              source_url: law.source_url || "",
+              score: 1,
+              snippet: first.snippet,
+              highlights: first.highlights,
+              match_type: evidenceList.every((item) => item.match_type === "exact") ? "exact" : "approximate",
+              content_status: first.content_status || "complete",
+              resource: first.resource || null,
+              matched_terms: evidenceList.map((item) => item.term),
+              unmatched_terms: terms.map((term) => term.raw).filter((raw) => !evidence.has(raw)),
+              matches: evidenceList,
+            },
+          ];
+        }
+        truncated = results.length > limit;
+      } else {
+        const qualifies = examined.filter((entry) => (operator === "AND" ? entry.matched.length === terms.length : entry.matched.length > 0));
+        for (const entry of examined) {
+          if (qualifies.includes(entry)) continue;
+          if (entry.matched.length > 0 && exact) filteredOutExact += 1;
+          // A term whose characters exist but sit inside a larger number was
+          // rejected by the exact rule, not a term the law never mentions.
+          else if (exact && entry.matches.some((match) => match.boundaryRejected)) filteredOutExact += 1;
+          else filteredOutNoTerm += 1;
+        }
+        const scored = qualifies
+          .map((entry) => ({ entry, score: scoreUnit(entry.unit.text, terms.flatMap((term) => term.bigrams)) }))
+          .sort((a, b) => b.score - a.score || a.entry.unit.label.localeCompare(b.entry.unit.label));
+        truncated = scored.length > limit;
+        results = scored.slice(0, limit).map(({ entry, score }) => {
+          const window = buildSearchWindow(entry.haystack, entry.matched.map((match) => windowMatch(entry, match)), snippetWindow);
+          return {
+            law_id: law.id,
+            title: law.title,
+            label: entry.unit.label,
+            heading: entry.unit.heading || "",
+            kind: entry.unit.kind,
+            unit_index: entry.unit.unitIndex,
+            unit_id: unitId(law.id, entry.unit),
+            snippet: window.snippet,
+            highlights: window.highlights,
+            source_url: law.source_url || "",
+            score,
+            match_type: entry.matched.every((match) => !match.approximate) ? "exact" : "approximate",
+            content_status: entry.unit.content_status || "complete",
+            resource: entry.unit.resource || null,
+            matched_terms: entry.matched.map((match) => match.term),
+            unmatched_terms: terms.map((term) => term.raw).filter((raw) => !entry.matched.some((match) => match.term === raw)),
+          };
+        });
+      }
       return textResult(
         JSON.stringify(
           {
             query,
             law_id: scopedLawId,
             operator,
-            scope: "law",
+            scope,
+            group_by: groupBy,
             exact,
             data_version: law.data_version || "",
             content_current_date: law.content_current_date || "",
@@ -737,6 +891,7 @@ async function callTool(env, name, args) {
             candidates: examined.length,
             candidates_examined: examined.length,
             filtered_out_exact: filteredOutExact,
+            filtered_out_no_term: filteredOutNoTerm,
             completeness: truncated ? "partial" : "complete",
             truncated,
             truncation_reasons: truncated ? ["result_limit"] : [],
@@ -852,40 +1007,77 @@ async function callTool(env, name, args) {
       return byIndex;
     };
 
+    const dropCandidate = (rejectedByExact) => {
+      if (rejectedByExact) filteredOutExact += 1;
+      else filteredOutNoTerm += 1;
+    };
+
     const evaluateChunk = (index, row) => {
       const body = String(row.text || row.snippet || "");
-      const haystack = normalizeWithMap(`${row.label || ""} ${row.heading || ""} ${body}`);
-      const verified =
-        exact && row.text
-          ? terms.map((term) => ({ raw: term.raw, match: firstPhraseMatch(haystack, term.normalized) }))
-          : terms.map((term) => ({
-              raw: term.raw,
-              match: {
-                found: term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index)),
-                approximate: true,
-              },
-            }));
-      const matched = verified.filter((entry) => entry.match.found);
+      const raw = `${row.label || ""} ${row.heading || ""} ${body}`;
+      const hasText = Boolean(row.text);
+      const rejectedByExact = exact && hasText;
+      // Cheap first pass: native string work only, so candidates that cannot
+      // hold a term are dropped before the per-character mapping loop runs.
+      // That is what keeps wide AND queries inside the Worker CPU budget
+      // (issue #67) instead of returning HTTP 503.
+      const flat = searchableText(raw);
+      const candidates = [];
+      for (const term of terms) {
+        if (hasText && flat.indexOf(term.normalized) >= 0) {
+          candidates.push(term);
+          continue;
+        }
+        const gramsOk = term.bigrams.length > 0 && term.bigrams.every((gram) => flat.includes(gram));
+        if ((!exact || !hasText) && gramsOk) {
+          candidates.push(term);
+          continue;
+        }
+        if (operator === "AND" && scope === "chunk") {
+          dropCandidate(rejectedByExact);
+          return;
+        }
+      }
+      if (!candidates.length) {
+        dropCandidate(rejectedByExact);
+        return;
+      }
+
+      const haystack = normalizeWithMap(raw);
+      const verified = candidates.map((term) => {
+        // Phrase verification runs first even when exact=false, so a chunk that
+        // really contains the phrase keeps match_type=exact instead of being
+        // reported approximate or dropped (issue #63).
+        const phrase = phraseMatchIn(haystack, term.normalized);
+        if (phrase.found) return { raw: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
+        if (rejectedByExact) return { raw: term.raw, found: false, approximate: false, start: -1, end: -1 };
+        // The candidate reached this point because every bigram of the term is
+        // present, so exact=false must keep it as an approximate hit even when
+        // the phrase never occurs contiguously (the 600点/500万円 shape from
+        // issue #52). There is simply no highlight position for it.
+        const loose = haystack.normalized.indexOf(term.normalized);
+        if (loose < 0) return { raw: term.raw, found: true, approximate: true, start: -1, end: -1 };
+        return { raw: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+      });
+      const matched = verified.filter((entry) => entry.found);
       // A candidate can hold every bigram without the phrase, which is exactly
       // the 600点/500万円 trap in issue #52.
-      const rejectedByExact = exact && Boolean(row.text);
       if (!matched.length) {
-        if (rejectedByExact) filteredOutExact += 1;
-        else filteredOutNoTerm += 1;
+        dropCandidate(rejectedByExact);
         return;
       }
       if (scope === "chunk" && operator === "AND" && matched.length !== terms.length) {
-        if (rejectedByExact) filteredOutExact += 1;
-        else filteredOutNoTerm += 1;
+        dropCandidate(rejectedByExact);
         return;
       }
       const score = Math.round((scores.get(index) || 0) * 10000) / 10000;
       const termMatches = matched.map((entry) => ({
         term: entry.raw,
-        startOrig: entry.match.found && entry.match.start !== undefined ? haystack.map[entry.match.start] : -1,
-        endOrig: entry.match.found && entry.match.end !== undefined ? (haystack.map[entry.match.end - 1] ?? -1) + 1 : -1,
-        approximate: Boolean(entry.match.approximate),
+        startOrig: entry.start >= 0 ? haystack.map[entry.start] ?? -1 : -1,
+        endOrig: entry.start >= 0 ? (haystack.map[entry.end - 1] ?? entry.start) + 1 : -1,
+        approximate: Boolean(entry.approximate),
       }));
+      const resultMatchType = matched.every((entry) => !entry.approximate) ? "exact" : "approximate";
 
       if (scope === "law" || groupBy === "law") {
         const lawId = row.law_id;
@@ -899,7 +1091,7 @@ async function callTool(env, name, args) {
           const window = buildSearchWindow(
             haystack,
             termMatches.filter((match) => match.term === entry.raw),
-            SNIPPET_WINDOW
+            snippetWindow
           );
           group.matches.set(entry.raw, {
             term: entry.raw,
@@ -909,14 +1101,15 @@ async function callTool(env, name, args) {
             unit_id: unitId(lawId, { label: row.label, kind: row.kind, unitIndex: row.unit_index }),
             snippet: window.snippet,
             highlights: window.highlights,
-            match_type: termMatches.find((match) => match.term === entry.raw)?.approximate ? "approximate" : "exact",
+            match_type: entry.approximate ? "approximate" : "exact",
             content_status: row.content_status || "complete",
           });
         }
         const satisfied =
           operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : group.matches.size > 0;
         if (satisfied && !results.some((item) => item.law_id === lawId)) {
-          const window = buildSearchWindow(haystack, termMatches.slice(0, 1), SNIPPET_WINDOW);
+          const window = buildSearchWindow(haystack, termMatches.slice(0, 1), snippetWindow);
+          const groupMatches = [...group.matches.values()];
           results.push({
             law_id: lawId,
             title: row.title,
@@ -927,11 +1120,12 @@ async function callTool(env, name, args) {
             score: group.score,
             snippet: window.snippet,
             highlights: window.highlights,
-            match_type: exact && row.text ? "exact" : "approximate",
+            match_type: groupMatches.every((item) => item.match_type === "exact") ? "exact" : "approximate",
             content_status: row.content_status || "complete",
+            resource: row.resource || null,
             matched_terms: [...group.matches.keys()],
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
-            matches: [...group.matches.values()],
+            matches: groupMatches,
           });
         }
         return;
@@ -943,7 +1137,7 @@ async function callTool(env, name, args) {
         return;
       }
       perLaw.set(row.law_id, count + 1);
-      const window = buildSearchWindow(haystack, termMatches, SNIPPET_WINDOW);
+      const window = buildSearchWindow(haystack, termMatches, snippetWindow);
       results.push({
         law_id: row.law_id,
         title: row.title,
@@ -954,8 +1148,9 @@ async function callTool(env, name, args) {
         score,
         snippet: window.snippet,
         highlights: window.highlights,
-        match_type: exact && row.text ? "exact" : "approximate",
+        match_type: resultMatchType,
         content_status: row.content_status || "complete",
+        resource: row.resource || null,
         matched_terms: matched.map((entry) => entry.raw),
         unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });
@@ -988,6 +1183,9 @@ async function callTool(env, name, args) {
         walked += 1;
         evaluateChunk(mate, row);
       }
+      // Each shard is visited once, so holding it after the walk only keeps up
+      // to 500 full chunk texts alive for nothing (issue #67).
+      chunkCache.delete(shard);
     }
     if (skippedPerLaw > 0 && results.length < limit) reasons.add("max_results_per_law");
     results.sort((a, b) => b.score - a.score || String(a.law_id).localeCompare(String(b.law_id)));
@@ -1009,6 +1207,7 @@ async function callTool(env, name, args) {
       pages_fetch_limit: MAX_PAGES_FETCHES,
       candidate_scan_limit: MAX_CANDIDATES_WALKED,
       posting_shard_limit: MAX_POSTING_SHARDS,
+      snippet_window_chars: snippetWindow,
     };
     return textResult(
       JSON.stringify(
@@ -1066,7 +1265,7 @@ const TOOLS = [
   {
     name: "search_laws_by_content",
     description:
-      "Two-stage body search over Higashimatsushima ordinances: bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text. exact=true (default) keeps only chunks where every query term appears as a contiguous phrase, so digits and units cannot be satisfied by unrelated bigrams. Returns snippet with highlights, match_type, matched/unmatched terms, and completeness counters. Results are bounded: at most 50 postings per term in the index, 3 chunks per law per term, 40 Pages fetches and 300 examined candidates per call. scope=chunk requires all terms in one chunk; scope=law aggregates per ordinance and returns matches[] with the evidence chunk for each term.",
+      "Two-stage body search over Higashimatsushima ordinances: bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text. exact=true (default) keeps only chunks where every query term appears as a contiguous phrase, and a phrase that starts or ends with a digit must sit on a number boundary, so 600万円 does not match inside 3,600万円. exact=false still reports contiguous matches as match_type=exact and labels bigram-only hits approximate. Returns snippet with highlights, match_type, matched/unmatched terms, and completeness counters. Results are bounded: at most 50 postings per term in the index, 3 chunks per law per term, 46 Pages fetches and 300 examined candidates per call. scope=chunk requires all terms in one chunk; scope=law aggregates per ordinance and returns matches[] with the evidence chunk for each term. law_id restricts the search to one ordinance and reports the scope it actually applied.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1077,6 +1276,7 @@ const TOOLS = [
         scope: { type: "string", enum: ["chunk", "law"], description: "chunk: all terms in the same chunk. law: all terms somewhere in the same ordinance. Default chunk." },
         group_by: { type: "string", enum: ["chunk", "law"], description: "Collapse results per ordinance. Default chunk (law when scope=law)." },
         exact: { type: "boolean", description: "Verify each term as a contiguous phrase in the chunk text. Default true; false keeps bigram-only matches labelled approximate." },
+        snippet_chars: { type: "number", description: "Snippet window size in characters, 80 to 800. Default 280. The window is centred on the match, not on the start of the chunk." },
       },
       required: ["query"],
       additionalProperties: false,
@@ -1099,7 +1299,7 @@ const TOOLS = [
   {
     name: "get_article",
     description:
-      "Fetch one article of an ordinance by its label such as 第1条 or 第2条の2. Optionally select one paragraph (paragraph=2) and one item (item=2) instead of the whole article.",
+      "Fetch one article of an ordinance by its label such as 第1条 or 第2条の2. Optionally select one paragraph (paragraph=2) and one item (item=2) instead of the whole article. Every response carries data_version and content_current_date so the published version is visible at article level.",
     inputSchema: {
       type: "object",
       properties: {
