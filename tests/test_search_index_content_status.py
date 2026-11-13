@@ -8,6 +8,9 @@ from search_index import SearchIndexBuilder, chunk_law
 
 
 RESOURCE = {"label": "様式第1号", "href": "https://example.test/sample.rtf", "image_url": "https://example.test/sample.png"}
+FORM_RESOURCE = {"label": "様式第1号(第14条関係)", "href": "https://example.test/form1.rtf"}
+SECOND_FORM_RESOURCE = {"label": "様式第2号(第15条関係)", "href": "https://example.test/form2.rtf"}
+TABLE_RESOURCE = {"label": "別表第3(第9条関係)", "href": "https://example.test/table3.rtf"}
 
 
 def build_law(resources=None):
@@ -72,6 +75,37 @@ class ContentStatusTest(unittest.TestCase):
         self.assertEqual(len(flagged), 1)
         self.assertEqual(flagged[0]["label"], "(様式第2号) 別に定める")
 
+
+    def test_appendix_table_resource_index_beats_positional_alignment(self):
+        law = build_law([FORM_RESOURCE, SECOND_FORM_RESOURCE, TABLE_RESOURCE])
+        law["appendix_tables"] = [
+            "別表第1 決裁区分\n課長 100万円以下",
+            "別表第2(第5条関係)",
+            "別表第3(第9条関係)",
+        ]
+        law["appendix_table_resource_index"] = [None, None, 2]
+        chunks = chunk_law(law)
+        flagged = [chunk for chunk in chunks if chunk["content_status"] == "external_resource_only"]
+        self.assertEqual(len(flagged), 1)
+        self.assertEqual(flagged[0]["label"], "別表第3(第9条関係)")
+        self.assertEqual(flagged[0]["resource"]["href"], TABLE_RESOURCE["href"])
+
+    def test_legacy_data_without_mapping_falls_back_to_the_label(self):
+        law = build_law([FORM_RESOURCE])
+        law["appendix_tables"] = ["別表第1 決裁区分\n課長 100万円以下", "様式第1号"]
+        chunks = chunk_law(law)
+        flagged = [chunk for chunk in chunks if chunk["content_status"] == "external_resource_only"]
+        self.assertEqual(len(flagged), 1)
+        self.assertEqual(flagged[0]["resource"]["label"], FORM_RESOURCE["label"])
+
+    def test_mapping_entry_of_none_never_borrows_a_form(self):
+        law = build_law([SECOND_FORM_RESOURCE])
+        law["appendix_tables"] = ["別表第2(第5条関係)"]
+        law["appendix_table_resource_index"] = [None]
+        chunks = chunk_law(law)
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk["content_status"] == "complete" for chunk in chunks))
+        self.assertTrue(all("resource" not in chunk for chunk in chunks))
 
 if __name__ == "__main__":
     unittest.main()
