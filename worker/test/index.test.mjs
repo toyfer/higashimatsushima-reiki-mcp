@@ -822,11 +822,22 @@ test("get_toc lists articles and units with pagination", async () => {
     assert.deepEqual(payload.chapters.map((chapter) => chapter.text), ["第1章 総則", "第2章 雑則"]);
     assert.equal(payload.articles[0].chapter, "第1章");
     assert.equal(payload.articles[0].chapter_title, "総則");
+    assert.deepEqual(payload.deleted_headings, []);
     assert.equal(payload.resources.length, 2);
     assert.equal(payload.resources[1].href, "word/r122FG00000002.rtf");
     assert.equal(payload.next_offset, null);
     const paged = toolText(await callTool("get_toc", { law_id: "r122RG00000002", limit: 1 }));
     assert.equal(paged.next_offset, 1);
+  } finally { restore(); }
+});
+
+test("get_toc surfaces deleted section headings", async () => {
+  const law = { ...SAMPLE_LAW, deleted_headings: ["第5節 鉱産税 削除"] };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": law });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000002" }));
+    assert.deepEqual(payload.deleted_headings, ["第5節 鉱産税 削除"]);
   } finally { restore(); }
 });
 
