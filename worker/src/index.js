@@ -389,11 +389,10 @@ function lawUnits(law) {
     });
   });
   const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
-  const resources = Array.isArray(law.resources) ? law.resources : [];
   tables.forEach((table, position) => {
     const text = String(table || "");
     const firstLine = text.split("\n")[0].trim();
-    const resource = resources[position] || null;
+    const resource = appendixResource(law, position);
     units.push({
       kind: "appendix_table",
       label: (firstLine || `別表${position + 1}`).slice(0, 40),
@@ -405,6 +404,19 @@ function lawUnits(law) {
     });
   });
   return units;
+}
+
+function appendixResource(law, position) {
+  const resources = Array.isArray(law.resources) ? law.resources : [];
+  const mapping = Array.isArray(law.appendix_table_resource_index) ? law.appendix_table_resource_index : null;
+  if (mapping) {
+    const index = mapping[position];
+    if (Number.isInteger(index) && index >= 0 && index < resources.length) {
+      return resources[index] || null;
+    }
+    return null;
+  }
+  return resources[position] || null;
 }
 
 function unitId(lawId, unit) {
@@ -674,7 +686,7 @@ async function callTool(env, name, args) {
     }
     const text = String(units[n - 1] || "");
     const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
-    const unitResource = kind === "appendix_table" && Array.isArray(law.resources) ? law.resources[n - 1] || null : null;
+    const unitResource = kind === "appendix_table" ? appendixResource(law, n - 1) : null;
     const contentStatus = kind === "appendix_table" && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
     return textResult(
       JSON.stringify(
