@@ -99,6 +99,14 @@
       "args": { "scope": "law", "limit": 5 },
       "must_include": ["r122RG00000308"],
       "note": "scope=law は条と別表をまたいで語が揃う条例を返す"
+    },
+    {
+      "name": "ranking-negation-first",
+      "query": "還付しない",
+      "args": { "limit": 10 },
+      "must_include": ["r122RG00000234"],
+      "must_rank_first": "r122RG00000234",
+      "note": "公園条例第14条（還付しない）が1位。還付した を含む下水道事業会計規則が上に来ない（#52）"
     }
   ]
 }

@@ -47,6 +47,9 @@ function inspect(testCase, payload) {
   if (missingUnits.length) problems.push(`missing_units=[${missingUnits.join(",")}]`);
   const leakedUnits = (testCase.must_exclude_units || []).filter((unit) => units.has(unit));
   if (leakedUnits.length) problems.push(`leaked_units=[${leakedUnits.join(",")}]`);
+  if (testCase.must_rank_first && rows[0]?.law_id !== testCase.must_rank_first) {
+    problems.push(`rank_first=${rows[0]?.law_id || "none"} (expected ${testCase.must_rank_first})`);
+  }
   const missingStatus = (testCase.must_include_status || []).filter((status) => !statuses.has(status));
   if (missingStatus.length) problems.push(`missing_status=[${missingStatus.join(",")}]`);
   const missingLabels = (testCase.must_include_labels || []).filter((label) => !labels.some((value) => value.includes(label)));

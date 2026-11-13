@@ -31,6 +31,7 @@ Network access to Pages is required; there is no offline mode. `PAGES_BASE` poin
 | `must_include` / `must_exclude` | Law IDs that must, or must not, appear in the results |
 | `must_include_labels` / `must_exclude_labels` | Substring that must, or must not, appear in a result `label`, which is how appendix tables and supplements are pinned |
 | `must_include_status` | A `content_status` that must appear, for example `external_resource_only` |
+| `must_rank_first` | Law ID that must be the first result, for ranking regressions |
 | `expect_completeness` | `complete` or `partial` |
 | `max_fetches` | Upper bound on `pages_fetches` for the case; `law_id` scoped searches must stay at 1 |
 | `note` | Why the case exists |
