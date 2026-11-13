@@ -24,6 +24,29 @@ class ChunkLawTest(unittest.TestCase):
         self.assertEqual(chunks[0]["kind"], "preamble")
         self.assertIn("契約", chunks[0]["search_text"])
 
+    def test_long_body_text_is_split_into_sentence_packed_chunks(self):
+        paragraph = "工事請負契約における随意契約の取扱いを定める。"
+        body = paragraph * 120
+        chunks = chunk_law(law(body_text=body))
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chunks[0]["label"], "前文")
+        self.assertEqual(chunks[1]["label"], "前文（2）")
+        self.assertTrue(all(chunk["kind"] == "preamble" for chunk in chunks))
+        self.assertTrue(all(len(chunk["text"]) <= search_index.LONG_ARTICLE_CHARS for chunk in chunks))
+        self.assertEqual("".join(chunk["text"] for chunk in chunks), body)
+        for chunk in chunks:
+            self.assertTrue(chunk["text"].endswith("。"))
+
+    def test_body_text_at_the_limit_stays_a_single_chunk(self):
+        body = "あ" * search_index.LONG_ARTICLE_CHARS
+        chunks = chunk_law(law(body_text=body))
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["label"], "前文")
+
+    def test_split_long_text_keeps_oversized_sentence_readable(self):
+        segments = search_index.split_long_text("あ" * 2500)
+        self.assertEqual([len(segment) for segment in segments], [1200, 1200, 100])
+
     def test_preamble_list_is_used_when_body_text_is_empty(self):
         chunks = chunk_law(law(preamble=["この訓令は契約の方法を定める。"]))
         self.assertEqual(len(chunks), 1)

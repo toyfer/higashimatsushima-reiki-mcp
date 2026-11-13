@@ -875,6 +875,44 @@ test("get_toc surfaces deleted section headings", async () => {
   } finally { restore(); }
 });
 
+test("get_toc reports body_text for a law without articles", async () => {
+  const bodyOnly = {
+    id: "r122RG00000521",
+    title: "東松島市工事請負契約における随意契約ガイドライン",
+    data_version: "fx",
+    source_url: "https://example.invalid/521.html",
+    articles: [],
+    appendix_tables: [],
+    supplements: [],
+    preamble: ["第1 趣旨", "このガイドラインは随意契約の取扱いを定める。"],
+    body_text: "第1 趣旨 このガイドラインは随意契約の取扱いを定める。",
+  };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000521.json": bodyOnly });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000521" }));
+    assert.equal(payload.article_count, 0);
+    assert.equal(payload.has_body_text, true);
+    assert.equal(payload.body_text_chars, bodyOnly.body_text.length);
+    assert.equal(payload.preamble_count, 2);
+    assert.match(payload.body_text_preview, /^第1 趣旨/);
+  } finally { restore(); }
+});
+
+test("get_toc ignores placeholder preambles and reports no body text", async () => {
+  const empty = { ...SAMPLE_LAW, articles: [], preamble: [SAMPLE_LAW.title, ""], body_text: "" };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": empty });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000002" }));
+    assert.equal(payload.article_count, 0);
+    assert.equal(payload.has_body_text, false);
+    assert.equal(payload.body_text_chars, 0);
+    assert.equal(payload.preamble_count, 0);
+    assert.equal(payload.body_text_preview, "");
+  } finally { restore(); }
+});
+
 test("get_unit returns one appendix table or supplement", async () => {
   const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
   const restore = mockFetch(impl);
