@@ -227,9 +227,10 @@ function numericBoundaryOk(original, startOrig, endOrig, termNormalized) {
 }
 
 function phraseMatchIn(haystack, termNormalized) {
-  if (!haystack || !termNormalized) return { found: false, start: -1, end: -1 };
+  if (!haystack || !termNormalized) return { found: false, start: -1, end: -1, boundaryRejected: false };
   const compact = haystack.normalized;
   let from = 0;
+  let boundaryRejected = false;
   while (from + termNormalized.length <= compact.length) {
     const start = compact.indexOf(termNormalized, from);
     if (start < 0) break;
@@ -237,11 +238,14 @@ function phraseMatchIn(haystack, termNormalized) {
     const startOrig = haystack.map[start];
     const endOrig = (haystack.map[end - 1] ?? startOrig) + 1;
     if (numericBoundaryOk(haystack.original, startOrig, endOrig, termNormalized)) {
-      return { found: true, start, end };
+      return { found: true, start, end, boundaryRejected: false };
     }
+    // The characters are there but the term sits inside a larger number
+    // (3,600万円 for 600万円), which matters for the exact:false counters.
+    boundaryRejected = true;
     from = start + 1;
   }
-  return { found: false, start: -1, end: -1 };
+  return { found: false, start: -1, end: -1, boundaryRejected };
 }
 
 function bestWindowStart(originals, size) {
@@ -762,7 +766,16 @@ async function callTool(env, name, args) {
         const matches = terms.map((term) => {
           const phrase = phraseMatchIn(haystack, term.normalized);
           if (phrase.found) return { term: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
-          if (exact) return { term: term.raw, found: false, approximate: false, start: -1, end: -1 };
+          if (exact) {
+            return {
+              term: term.raw,
+              found: false,
+              approximate: false,
+              start: -1,
+              end: -1,
+              boundaryRejected: Boolean(phrase.boundaryRejected),
+            };
+          }
           const loose = haystack.normalized.indexOf(term.normalized);
           if (loose >= 0) return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
           const gramsOk = term.bigrams.length > 0 && term.bigrams.every((gram) => haystack.normalized.includes(gram));
@@ -816,7 +829,8 @@ async function callTool(env, name, args) {
               snippet: first.snippet,
               highlights: first.highlights,
               match_type: evidenceList.every((item) => item.match_type === "exact") ? "exact" : "approximate",
-              content_status: "complete",
+              content_status: first.content_status || "complete",
+              resource: first.resource || null,
               matched_terms: evidenceList.map((item) => item.term),
               unmatched_terms: terms.map((term) => term.raw).filter((raw) => !evidence.has(raw)),
               matches: evidenceList,
@@ -829,6 +843,9 @@ async function callTool(env, name, args) {
         for (const entry of examined) {
           if (qualifies.includes(entry)) continue;
           if (entry.matched.length > 0 && exact) filteredOutExact += 1;
+          // A term whose characters exist but sit inside a larger number was
+          // rejected by the exact rule, not a term the law never mentions.
+          else if (exact && entry.matches.some((match) => match.boundaryRejected)) filteredOutExact += 1;
           else filteredOutNoTerm += 1;
         }
         const scored = qualifies
@@ -1105,6 +1122,7 @@ async function callTool(env, name, args) {
             highlights: window.highlights,
             match_type: groupMatches.every((item) => item.match_type === "exact") ? "exact" : "approximate",
             content_status: row.content_status || "complete",
+            resource: row.resource || null,
             matched_terms: [...group.matches.keys()],
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
             matches: groupMatches,
@@ -1132,6 +1150,7 @@ async function callTool(env, name, args) {
         highlights: window.highlights,
         match_type: resultMatchType,
         content_status: row.content_status || "complete",
+        resource: row.resource || null,
         matched_terms: matched.map((entry) => entry.raw),
         unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });
