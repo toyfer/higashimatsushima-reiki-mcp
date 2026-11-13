@@ -115,6 +115,19 @@ test("an inline appendix table never borrows the form resource that precedes it"
   }
 });
 
+test("law scoped content search carries the appendix resource and status", async () => {
+  const restore = installPages();
+  try {
+    const payload = await callTool("search_laws_by_content", { law_id: MAPPED_LAW.id, query: "別表第2" });
+    const hit = payload.results.find((row) => String(row.label).startsWith("別表第2"));
+    assert.ok(hit, JSON.stringify(payload.results));
+    assert.equal(hit.resource?.href, "honbun_2.rtf");
+    assert.equal(hit.content_status, "external_resource_only");
+  } finally {
+    restore();
+  }
+});
+
 test("laws published before the mapping existed keep the positional fallback", async () => {
   const restore = installPages();
   try {
