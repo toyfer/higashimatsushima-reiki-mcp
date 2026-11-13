@@ -477,6 +477,40 @@ test("search_laws_by_title honors limit and returns zero hits", async () => {
   } finally { restore(); }
 });
 
+test("search_laws_by_title folds full-width digits with NFKC", async () => {
+  const { impl } = pagesRouter({ "/api/search/title-index.json": TITLE_INDEX });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_laws_by_title", arguments: { query: "条例第１０号" } } }), {});
+    const payload = toolText(await res.json());
+    assert.deepEqual(payload.laws.map((law) => law.id), ["r122RG00000001"]);
+    assert.equal(payload.count, 1);
+  } finally { restore(); }
+});
+
+test("search_laws_by_title matches space separated words that are not adjacent", async () => {
+  const { impl } = pagesRouter({ "/api/search/title-index.json": TITLE_INDEX });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_laws_by_title", arguments: { query: "東松島 手数料" } } }), {});
+    const payload = toolText(await res.json());
+    assert.deepEqual(payload.laws.map((law) => law.id), ["r122RG00000001", "r122RG00000003"]);
+    const ideographic = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_laws_by_title", arguments: { query: "東松島　税" } } }), {});
+    assert.deepEqual(toolText(await ideographic.json()).laws.map((law) => law.id), ["r122RG00000002"]);
+  } finally { restore(); }
+});
+
+test("search_laws_by_title requires every term to match", async () => {
+  const { impl } = pagesRouter({ "/api/search/title-index.json": TITLE_INDEX });
+  const restore = mockFetch(impl);
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_laws_by_title", arguments: { query: "東松島 存在しない" } } }), {});
+    const payload = toolText(await res.json());
+    assert.equal(payload.count, 0);
+    assert.deepEqual(payload.laws, []);
+  } finally { restore(); }
+});
+
 test("get_law fetches /api/laws/<law_id>.json and returns the law", async () => {
   const { impl, requested } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
   const restore = mockFetch(impl);
