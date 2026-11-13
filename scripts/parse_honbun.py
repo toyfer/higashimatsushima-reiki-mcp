@@ -13,6 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reiki_common import html_to_text
 
 PRIMARY_RE = re.compile(r'<div id="primary".*?<!-- /本文 -->', re.S)
+# The page repeats every structural heading in a table of contents before the
+# body. TOC rows are <p class="toc_item-chapter"> / "toc_item-section" /
+# "toc_item-supplement" and may or may not carry a (第N条―第M条) range, so they
+# must not reach the line list: a TOC row consumed a chapter entry and shifted
+# every article's chapter/section (issue #81).
+TOC_ITEM_RE = re.compile(r'<p[^>]*class="toc_item[^"]*"[^>]*>.*?</p>', re.S)
+TOC_TITLE_RE = re.compile(r'<div class="toc">.*?</div>', re.S)
 TITLE_TAG_RE = re.compile(r"<title>(.*?)</title>", re.S | re.I)
 SECONDARY_TITLE_RE = re.compile(r'<h2 class="heading-lv2A">(.*?)</h2>', re.S)
 DATENUMBER_RE = re.compile(r'<p class="datenumber-area[^"]*">(.*?)</p>', re.S)
@@ -127,7 +134,7 @@ def clean_title(value: str) -> str:
 def extract_lines(html: str) -> tuple[list[str], str]:
     match = PRIMARY_RE.search(html)
     scope = match.group(0) if match else html
-    text = html_to_text(scope)
+    text = html_to_text(TOC_TITLE_RE.sub("", TOC_ITEM_RE.sub("", scope)))
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines, scope
 
@@ -312,7 +319,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     supplements: list[str] = []
     appendix_tables: list[str] = []
     appendix_styles: list[str] = []
+    # A chapter and a section are tracked separately: entering a section used
+    # to overwrite the chapter, so articles under any section lost theirs (#81).
     current_chapter: dict[str, str] | None = None
+    current_section: dict[str, str] | None = None
     chapter_index = 0
     mode = "preamble"
     current_article: dict[str, Any] | None = None
@@ -381,8 +391,13 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         if line in chapter_texts:
             absorb_deferred_heading()
             if chapter_index < len(chapters):
-                current_chapter = chapters[chapter_index]
+                entry = chapters[chapter_index]
                 chapter_index += 1
+                if entry.get("kind") == "section":
+                    current_section = entry
+                else:
+                    current_chapter = entry
+                    current_section = None
             continue
         if CHAPTER_LINE_RE.match(line) or SECTION_LINE_RE.match(line):
             # Table-of-contents entries ("第2章 見出し(第N条―第M条)") are
@@ -429,10 +444,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
                 "branch": to_int(branch) if branch else None,
                 "label": label,
                 "heading": heading,
-                "chapter": current_chapter["number"] if current_chapter and current_chapter["kind"] == "chapter" else "",
-                "chapter_title": current_chapter["title"] if current_chapter and current_chapter["kind"] == "chapter" else "",
-                "section": current_chapter["number"] if current_chapter and current_chapter["kind"] == "section" else "",
-                "section_title": current_chapter["title"] if current_chapter and current_chapter["kind"] == "section" else "",
+                "chapter": current_chapter["number"] if current_chapter else "",
+                "chapter_title": current_chapter["title"] if current_chapter else "",
+                "section": current_section["number"] if current_section else "",
+                "section_title": current_section["title"] if current_section else "",
                 "_lines": [line],
                 "paragraphs": [],
             }
