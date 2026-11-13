@@ -82,19 +82,45 @@ def _preamble_text(law: dict[str, Any]) -> str:
     return text
 
 
-def _resource_at(resources: list[Any], position: int) -> dict[str, Any] | None:
-    """Resources are aligned with appendix_tables by 0-based index."""
-    if position < 0 or position >= len(resources):
+def _resource_at(law: dict[str, Any], position: int, label: str = "") -> dict[str, Any] | None:
+    """Resolve the downloadable file that belongs to one appendix table.
+
+    The resource list mixes 様式 and 別表 entries, so a positional lookup alone
+    attaches unrelated forms to a table. ``appendix_table_resource_index`` is
+    the authoritative mapping; label matching and position are only fallbacks
+    for data built before that mapping existed.
+    """
+    resources = law.get("resources") or []
+    if not isinstance(resources, list):
         return None
-    item = resources[position]
-    return item if isinstance(item, dict) else None
+    mapping = law.get("appendix_table_resource_index")
+    if isinstance(mapping, list):
+        if 0 <= position < len(mapping):
+            index = mapping[position]
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(resources):
+                item = resources[index]
+                return item if isinstance(item, dict) else None
+        return None
+    wanted = label.strip()
+    if len(wanted) >= 4:
+        for item in resources:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("label") or "").strip()
+            if len(candidate) < 4:
+                continue
+            if wanted.startswith(candidate) or candidate.startswith(wanted):
+                return item
+    if 0 <= position < len(resources):
+        item = resources[position]
+        return item if isinstance(item, dict) else None
+    return None
 
 
 def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
     law_id = str(law.get("id") or "")
     title = str(law.get("title") or "")
     source_url = str(law.get("source_url") or "")
-    resources = law.get("resources") or []
     chunks: list[dict[str, Any]] = []
 
     def add(
@@ -156,7 +182,7 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
         lines = raw_body.splitlines()
         heading_line = lines[0].strip()[:40] if lines else ""
         label = heading_line or f"別表{position + 1}"
-        resource = _resource_at(resources, position)
+        resource = _resource_at(law, position, label)
         # Appendix tables that only have a downloadable RTF/PNG are not
         # complete text: flag the chunk itself so the Worker can surface
         # content_status=external_resource_only per result (issue #65).
