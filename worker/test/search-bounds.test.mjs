@@ -179,6 +179,26 @@ test("exact=false keeps contiguous phrases exact instead of dropping them (#63)"
   }
 });
 
+test("exact hits stay above approximate ones when exact is false (#79)", async () => {
+  const restore = installPages();
+  try {
+    const data = await callTool("search_laws_by_content", { query: "600万円", exact: false, limit: 5 });
+    assert.ok(data.results.length > 1, JSON.stringify(data.results));
+    // The chunk that really holds the phrase must lead, even though the
+    // appendix hits sharing the bigrams score higher (issue #79).
+    assert.equal(data.results[0].law_id, "r122RG00000494");
+    assert.equal(data.results[0].match_type, "exact");
+    const types = data.results.map((row) => row.match_type);
+    const lastExact = types.lastIndexOf("exact");
+    const firstApproximate = types.indexOf("approximate");
+    assert.ok(firstApproximate === -1 || firstApproximate > lastExact, `exact must precede approximate: ${types}`);
+    const narrow = await callTool("search_laws_by_content", { query: "600万円", exact: false, limit: 1 });
+    assert.equal(narrow.results[0].law_id, "r122RG00000494");
+  } finally {
+    restore();
+  }
+});
+
 test("AND query without a common chunk returns counters instead of failing (#67)", async () => {
   const restore = installPages();
   try {

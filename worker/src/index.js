@@ -1182,8 +1182,19 @@ async function callTool(env, name, args) {
     };
 
     const collectTarget = Math.min(limit * 3, 60);
+    // With exact:false, approximate hits must not crowd out the exact hits that
+    // later shards still hold. Keep walking until enough *exact* results are
+    // collected, but cap the approximate filler so a query with no exact hit at
+    // all does not spend the whole fetch budget (issues #79, #78).
+    const approximateFillerCap = collectTarget * 4;
+    const collectedEnough = () => {
+      if (results.length < collectTarget) return false;
+      if (exact) return true;
+      const exactCount = results.filter((row) => row.match_type === "exact").length;
+      return exactCount >= collectTarget || results.length >= approximateFillerCap;
+    };
     for (const shard of shardOrder) {
-      if (results.length >= collectTarget) break;
+      if (collectedEnough()) break;
       if (walked >= MAX_CANDIDATES_WALKED) {
         reasons.add("candidate_scan_limit");
         break;
@@ -1197,7 +1208,7 @@ async function callTool(env, name, args) {
       // keeps the fetch budget for coverage instead of repeat downloads.
       for (const mate of byShard.get(shard) || []) {
         if (done.has(mate)) continue;
-        if (results.length >= collectTarget) break;
+        if (collectedEnough()) break;
         if (walked >= MAX_CANDIDATES_WALKED) {
           reasons.add("candidate_scan_limit");
           break;
@@ -1213,7 +1224,15 @@ async function callTool(env, name, args) {
       chunkCache.delete(shard);
     }
     if (skippedPerLaw > 0 && results.length < limit) reasons.add("max_results_per_law");
-    results.sort((a, b) => b.score - a.score || String(a.law_id).localeCompare(String(b.law_id)));
+    // Exact evidence outranks approximate evidence regardless of score: an
+    // appendix boosted approximate hit must not sit above the article that
+    // actually contains the phrase (issue #79).
+    results.sort(
+      (a, b) =>
+        (a.match_type === "exact" ? 0 : 1) - (b.match_type === "exact" ? 0 : 1) ||
+        b.score - a.score ||
+        String(a.law_id).localeCompare(String(b.law_id))
+    );
     if (results.length > limit) {
       results.length = limit;
       reasons.add("result_limit");
