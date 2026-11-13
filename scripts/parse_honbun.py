@@ -33,7 +33,9 @@ HISTORY_DATE_RE = re.compile(r"^(?:(?:明治|大正|昭和|平成|令和)[0-9０
 # The number cell also carries document kinds such as 訓令甲第28号, so require
 # a 第N号 tail rather than a fixed prefix list.
 HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,30}第[0-9０-９]+号$")
-ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条(?:の([0-9０-９]+))?\s*(.*)$")
+# 「第9条の2の2」「第36条の3の2」のように枝番が 2 段以上続く例規がある。
+# 1 段だけを許すと番号が切り詰められ、ラベルが衝突して本文先頭に「の2」が残る (issue #97)。
+ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条((?:の[0-9０-９]+)*)\s*(.*)$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
 SUPPLEMENT_RE = re.compile(r"^附\s*則")
 # Structural headings. The city marks chapters with <div class="chapter"><p
@@ -77,7 +79,7 @@ APPENDIX_TITLE_HINT_RE = re.compile(r"^別表[0-9０-９第\(（]")
 # 様式第1号により… wrapped to the start of a line is prose, not a heading, so
 # the pattern only fires when the 号 is followed by the end of the line, a
 # space, or an opening paren.
-STYLE_SECTION_RE = re.compile(r"^様式(?:第?[0-9０-９]+号(?:の[0-9０-９]+)?(?=\s|[\(（]|$)|[\(（])")
+STYLE_SECTION_RE = re.compile(r"^様式(?:第?[0-9０-９]+号(?:(?:の|[-－―‐‑])[0-9０-９]+)*(?=\s|[\(（]|$)|[\(（])")
 # 別表第1―1 and 別表第1の1 are sub-tables of 別表第1, so the branch number is
 # part of the identity: matching only the main number made every branch collide
 # with its parent (issue #61 review).
@@ -449,7 +451,14 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             continue
 
         article_match = ARTICLE_START_RE.match(line)
-        starts_article = bool(article_match) and not SUPPLEMENT_RE.match(line)
+        # 附則・改正附則・別表・様式の中にも「第1条」形式の行がある。ここで
+        # mode を戻すと附則の条文が本則 articles[] に混入し、同名ラベルが
+        # 何十件も並ぶ (issue #95)。本文の条だけが article に切り替える。
+        starts_article = (
+            bool(article_match)
+            and not SUPPLEMENT_RE.match(line)
+            and mode not in {"supplement", "appendix", "style"}
+        )
         if deferred_heading:
             if starts_article:
                 if not pending_heading:
@@ -475,10 +484,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
                     heading, body_first = inline_heading, inline_body
             label = f"第{to_int(number_text)}条"
             if branch:
-                label += f"の{to_int(branch)}"
+                label += "".join(f"の{to_int(part)}" for part in branch.split("の") if part)
             current_article = {
                 "number": to_int(number_text),
-                "branch": to_int(branch) if branch else None,
+                "branch": to_int(branch.split("の")[1]) if branch else None,
                 "label": label,
                 "heading": heading,
                 "chapter": current_chapter["number"] if current_chapter else "",
