@@ -67,7 +67,9 @@ DATE_NUMBER_SPLIT_RE = re.compile(r"^(.*?)\s+(.+)$")
 # a heading, so they were captured as deferred headings and, when a chapter
 # heading sat between them and the next article, became that article's heading
 # while also disappearing from the amended article's text (issue #61).
-AMENDMENT_ERA_RE = re.compile(r"^[\(（](?:明治|大正|昭和|平成|令和)\s*(?:[0-9０-９]+|元)")
+# The city site abbreviates eras (令8, 平30, 昭62), so both the short and the
+# full form must be accepted.
+AMENDMENT_ERA_RE = re.compile(r"^[\(（](?:明治|大正|昭和|昭|平成|平|令和|令)\s*(?:[0-9０-９]+|元)")
 AMENDMENT_WORD_RE = re.compile(r"(?:一部改正|全部改正|全改|改正|改定|追加|削除|新旧対照)")
 AMENDMENT_NUMBER_RE = re.compile(r"第[0-9０-９]+号[\)）]$")
 
