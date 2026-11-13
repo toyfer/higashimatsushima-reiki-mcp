@@ -82,40 +82,54 @@ def _preamble_text(law: dict[str, Any]) -> str:
     return text
 
 
+def _resource_at(resources: list[Any], position: int) -> dict[str, Any] | None:
+    """Resources are aligned with appendix_tables by 0-based index."""
+    if position < 0 or position >= len(resources):
+        return None
+    item = resources[position]
+    return item if isinstance(item, dict) else None
+
+
 def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
     law_id = str(law.get("id") or "")
     title = str(law.get("title") or "")
     source_url = str(law.get("source_url") or "")
+    resources = law.get("resources") or []
     chunks: list[dict[str, Any]] = []
 
-    # Appendix tables that only have a downloadable RTF/PNG are not
-    # complete text: flag them so the Worker can surface
-    # content_status=external_resource_only (issue #51).
-    resources = law.get("resources") or []
-    external_only = bool(resources) and any(
-        "\n" not in str(table).strip() for table in (law.get("appendix_tables") or [])
-    )
-
-    def add(label: str, heading: str, body: str, kind: str) -> None:
+    def add(
+        label: str,
+        heading: str,
+        body: str,
+        kind: str,
+        content_status: str = "complete",
+        resource: dict[str, Any] | None = None,
+    ) -> None:
         collapsed = _collapse(body)
         if not collapsed:
             return
-        chunks.append(
-            {
-                "law_id": law_id,
-                "title": title,
-                "label": label,
-                "heading": heading,
-                "kind": kind,
-                "source_url": source_url,
-                "snippet": collapsed[:SNIPPET_CHARS],
-                # Full body text, kept so the Worker can verify a phrase and
-                # build a query-aware window instead of trusting bigram
-                # coincidence alone (issues #49, #52).
-                "text": collapsed,
-                "search_text": _collapse(" ".join([title, label, heading, collapsed])),
+        chunk: dict[str, Any] = {
+            "law_id": law_id,
+            "title": title,
+            "label": label,
+            "heading": heading,
+            "kind": kind,
+            "source_url": source_url,
+            "content_status": content_status,
+            "snippet": collapsed[:SNIPPET_CHARS],
+            # Full body text, kept so the Worker can verify a phrase and
+            # build a query-aware window instead of trusting bigram
+            # coincidence alone (issues #49, #52).
+            "text": collapsed,
+            "search_text": _collapse(" ".join([title, label, heading, collapsed])),
+        }
+        if resource is not None:
+            chunk["resource"] = {
+                "label": str(resource.get("label") or ""),
+                "href": str(resource.get("href") or ""),
+                "image_url": str(resource.get("image_url") or ""),
             }
-        )
+        chunks.append(chunk)
 
     preamble = _preamble_text(law)
     if preamble:
@@ -137,11 +151,18 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
             number = paragraph.get("number", "")
             paragraph_label = f"{label} 第{number}項" if label and number != "" else label
             add(paragraph_label, heading, _paragraph_text(paragraph), "article_paragraph")
-    for position, table in enumerate(law.get("appendix_tables") or [], start=1):
+    for position, table in enumerate(law.get("appendix_tables") or []):
         raw_body = str(table)
         lines = raw_body.splitlines()
         heading_line = lines[0].strip()[:40] if lines else ""
-        label = heading_line or f"別表{position}"
+        label = heading_line or f"別表{position + 1}"
+        resource = _resource_at(resources, position)
+        # Appendix tables that only have a downloadable RTF/PNG are not
+        # complete text: flag the chunk itself so the Worker can surface
+        # content_status=external_resource_only per result (issue #65).
+        external_only = resource is not None and "\n" not in raw_body.strip()
+        content_status = "external_resource_only" if external_only else "complete"
+        attached_resource = resource if external_only else None
         groups: dict[str, list[str]] = {}
         for line in lines[1:]:
             collapsed_line = _collapse(line)
@@ -149,12 +170,10 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             groups.setdefault(label, []).append(collapsed_line)
         if not groups:
-            add(label, "", raw_body, "appendix_table")
-            if external_only and label == (lines[0].strip()[:40] if lines else ""):
-                chunks[-1]["content_status"] = "external_resource_only"
+            add(label, "", raw_body, "appendix_table", content_status, attached_resource)
             continue
         for group_label, rows in groups.items():
-            add(group_label, "", " ".join(rows), "appendix_table")
+            add(group_label, "", " ".join(rows), "appendix_table", content_status, attached_resource)
     for position, supplement in enumerate(law.get("supplements") or [], start=1):
         label = f"附則{position}" if len(law.get("supplements") or []) > 1 else "附則"
         add(label, "", str(supplement), "supplement")
@@ -219,23 +238,32 @@ class SearchIndexBuilder:
                     break
             postings[term] = kept
         chunk_files: dict[str, Any] = {}
+        external_resource_chunks = 0
+        external_resource_terms = 0
         for start in range(0, total, CHUNK_SHARD_SIZE):
             rows = []
             for index in range(start, min(start + CHUNK_SHARD_SIZE, total)):
                 chunk = self._chunks[index]
-                rows.append(
-                    {
-                        "i": index,
-                        "law_id": chunk["law_id"],
-                        "title": chunk["title"],
-                        "label": chunk["label"],
-                        "heading": chunk["heading"],
-                        "kind": chunk.get("kind", ""),
-                        "source_url": chunk.get("source_url", ""),
-                        "snippet": chunk["snippet"],
-                        "text": chunk.get("text", chunk["snippet"]),
-                    }
-                )
+                content_status = str(chunk.get("content_status") or "complete")
+                if content_status != "complete":
+                    external_resource_chunks += 1
+                    external_resource_terms += len(chunk.get("search_text") or "")
+                row: dict[str, Any] = {
+                    "i": index,
+                    "law_id": chunk["law_id"],
+                    "title": chunk["title"],
+                    "label": chunk["label"],
+                    "heading": chunk["heading"],
+                    "kind": chunk.get("kind", ""),
+                    "source_url": chunk.get("source_url", ""),
+                    "content_status": content_status,
+                    "snippet": chunk["snippet"],
+                    "text": chunk.get("text", chunk["snippet"]),
+                }
+                resource = chunk.get("resource")
+                if isinstance(resource, dict):
+                    row["resource"] = resource
+                rows.append(row)
             chunk_files[f"chunks-{start // CHUNK_SHARD_SIZE:03d}.json"] = {"data_version": data_version, "chunks": rows}
         sharded: dict[int, dict[str, list[list[Any]]]] = {}
         for term in sorted(postings):
@@ -263,6 +291,11 @@ class SearchIndexBuilder:
             # monitored (raising these caps would enlarge the shards quickly).
             "posting_terms": posting_terms,
             "posting_entries": posting_entries,
+            # Appendix tables whose body is only a downloadable file. The Worker
+            # reports content_status per result so callers know the text is not
+            # complete (issue #65).
+            "external_resource_chunks": external_resource_chunks,
+            "external_resource_chars": external_resource_terms,
             "files": {"chunks": sorted(chunk_files), "postings": sorted(posting_files)},
         }
         return {"manifest": manifest, "chunks": chunk_files, "postings": posting_files}
