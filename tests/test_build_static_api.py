@@ -1,7 +1,9 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -232,6 +234,20 @@ class ExpectedCountHealthTest(unittest.TestCase):
         self.assertTrue(health["ok"])
         self.assertEqual(health["validation_problems"], [])
         self.assertEqual(meta["expected_count"], 3)
+
+    def test_build_records_the_commit_that_produced_it(self):
+        with unittest.mock.patch.dict(os.environ, {"BUILD_COMMIT": "f985ce0011"}):
+            code, health, meta = self.run_build(self.sample_laws())
+        self.assertEqual(code, 0)
+        self.assertEqual(health["commit_sha"], "f985ce0011")
+        self.assertEqual(meta["commit_sha"], "f985ce0011")
+
+    def test_missing_build_commit_is_published_as_empty(self):
+        with unittest.mock.patch.dict(os.environ, {"BUILD_COMMIT": ""}):
+            code, health, meta = self.run_build(self.sample_laws())
+        self.assertEqual(code, 0)
+        self.assertEqual(health["commit_sha"], "")
+        self.assertEqual(meta["commit_sha"], "")
 
     def test_informational_warning_does_not_block_fail_on_error(self) -> None:
         code, health, meta = self.run_build(

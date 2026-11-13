@@ -23,8 +23,19 @@ Scheduled workflows only run from the default branch. Push these files to the re
 | Push to `main` that touches a parser, index or builder script | full build | The pushed diff is inspected in the guard step, because a path filter cannot tell a script edit from a status-only update |
 | `workflow_call` from `daily-reiki-check.yml` | full build | Fires only when the menu hash or the content date changed, so quiet days still cost one request |
 | `schedule` | full build | Weekly insurance for body-only replacements that leave the menu hash and the content date untouched |
+| Push to `main` whose published build predates a parser or index change | full build | A cancelled earlier push in the same batch would otherwise hide the script change it carried (issue #74) |
 
 The weekly run is `17 19 * * 6` in UTC, which is Sunday 04:17 JST, one hour after the daily check so the two runs never queue behind each other. A scheduled run always builds the full API; it is not a cheap check.
+
+The pushed diff alone cannot prove the published API is current. When two pull requests merge a few minutes apart, the run for the first push is dropped by the `github-pages` concurrency group and the run for the second push only sees its own diff, which may be documentation. `api/health.json` therefore carries `commit_sha`, the commit that produced the published build, and the guard compares that commit with `HEAD`:
+
+```bash
+git diff --name-only "$published_commit" "$HEAD_SHA" -- scripts/parse_honbun.py scripts/search_index.py scripts/build_static_api.py scripts/reiki_common.py
+```
+
+A non-empty diff forces a full build even when the current push touched nothing but docs. `BUILD_COMMIT` is set to `github.sha` on both build steps, so every publish records its own revision.
+
+A published `health.json` without `commit_sha` predates this check. The guard logs `published_commit=unknown` and falls back to the pushed diff, and the next full build populates the field, so the gap closes by itself after one refresh.
 
 A push that only refreshes `data/status/latest.json` still takes the 5-ordinance sample path.
 
