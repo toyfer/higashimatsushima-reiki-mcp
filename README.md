@@ -12,7 +12,7 @@ The daily checker never loads every ordinance body by default. It first checks t
 |---|---|
 | Higashimatsushima City site | Official ordinance HTML. Always treat it as the primary source. |
 | GitHub Actions `daily-reiki-check.yml` | Daily menu check, index crawl on change, status commit and issue notifications. |
-| GitHub Actions `pages.yml` | Builds static JSON under `site/api/` and deploys `site/` to GitHub Pages. |
+| GitHub Actions `pages.yml` | Builds static JSON under `site/api/` and deploys `site/` to GitHub Pages. Runs on push, on a weekly schedule and through `workflow_call` from the daily check. |
 | GitHub Pages | Static read-only API: `/api/meta.json`, `/api/laws/index.json`, `/api/laws/{law_id}.json`. |
 | Cloudflare Worker | Wraps the static API and exposes `/mcp` plus `/health`. |
 | MCP client | Calls the Worker endpoint. It does not read GitHub Pages directly. |
@@ -70,7 +70,7 @@ Runs at 03:17 JST. The workflow file uses UTC cron `17 18 * * *`.
 
 ### Pages deploy
 
-`pages.yml` runs on pushes that touch `site/**`, the builder scripts, the status file, or the workflow itself.
+`pages.yml` runs on pushes that touch `site/**`, the builder scripts, the status file, or the workflow itself. It also runs weekly (`17 19 * * 6`) and is called by `daily-reiki-check.yml` when the city site changed. Those two paths always build the full API, so a merged parser fix reaches Pages without a manual dispatch.
 
 Manual runs expose:
 
@@ -78,6 +78,7 @@ Manual runs expose:
 |---|---|
 | `full_build=false` | Build a 5-ordinance sample API and deploy it. Use this first. |
 | `full_build=true` | Fetch every ordinance body in `data/status/latest.json` and deploy the full API. |
+| `allow_sample_overwrite` | Permit a 5-ordinance sample run to replace a larger published API. Ignored when `full_build=true`. Leave it `false`; the guard skips the sample deploy instead of downgrading the site. |
 | `delay_seconds` | Delay between city-site fetches during a full build. Keep the default unless there is a reason to change it. |
 
 Do not run full builds repeatedly against the city site during development.
