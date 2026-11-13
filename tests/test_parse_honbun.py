@@ -4,7 +4,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from parse_honbun import parse_honbun
+from parse_honbun import (
+    STYLE_SECTION_RE,
+    appendix_table_key,
+    build_resource_map,
+    is_amendment_note,
+    parse_honbun,
+)
 
 FIXTURE = """
 <html><head><title>東松島市テスト条例</title></head><body>
@@ -424,3 +430,46 @@ class ChapterAndResourceTest(unittest.TestCase):
         )
         # The heading is still published so the table stays discoverable.
         self.assertTrue(any("別表第1" in table for table in data["appendix_tables"]))
+
+
+class AppendixResourceMapTest(unittest.TestCase):
+    def test_branch_tables_are_distinct_from_their_parent(self) -> None:
+        self.assertEqual(appendix_table_key("別表第1(第2条関係)"), (1, 0))
+        self.assertEqual(appendix_table_key("別表第1―1"), (1, 1))
+        self.assertEqual(appendix_table_key("別表第1の2"), (1, 2))
+        self.assertIsNone(appendix_table_key("別表(第2条関係)"))
+
+    def test_branch_rows_map_to_their_own_resources(self) -> None:
+        tables = ["別表第1(第2条関係)", "別表第1―1", "別表第1―2"]
+        resources = [
+            {"label": "様式第1号(第3条関係)", "kind": "form"},
+            {"label": "別表第1―2", "kind": "appendix"},
+            {"label": "別表第1", "kind": "appendix"},
+        ]
+        self.assertEqual(build_resource_map(tables, resources), [2, None, 1])
+
+    def test_unnumbered_table_takes_the_next_appendix_resource(self) -> None:
+        tables = ["別表(第2条関係)"]
+        resources = [
+            {"label": "様式第1号(第3条関係)", "kind": "form"},
+            {"label": "別表", "kind": "appendix"},
+        ]
+        self.assertEqual(build_resource_map(tables, resources), [1])
+
+
+class StyleSectionBoundaryTest(unittest.TestCase):
+    def test_heading_form_matches(self) -> None:
+        self.assertIsNotNone(STYLE_SECTION_RE.match("様式第1号(第14条関係)"))
+        self.assertIsNotNone(STYLE_SECTION_RE.match("様式第1号の2（第3条関係）"))
+        self.assertIsNotNone(STYLE_SECTION_RE.match("様式第1号"))
+
+    def test_wrapped_prose_is_not_a_heading(self) -> None:
+        self.assertIsNone(STYLE_SECTION_RE.match("様式第1号により定める。"))
+        self.assertIsNone(STYLE_SECTION_RE.match("様式は別に定める。"))
+
+
+class AmendmentEraTest(unittest.TestCase):
+    def test_abbreviated_meiji_and_taisho_notes_are_recognised(self) -> None:
+        self.assertTrue(is_amendment_note("(明42訓令甲3・一部改正)"))
+        self.assertTrue(is_amendment_note("(大11訓令甲1・一部改正)"))
+        self.assertTrue(is_amendment_note("(令8訓令甲23・一部改正)"))
