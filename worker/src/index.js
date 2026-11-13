@@ -389,11 +389,10 @@ function lawUnits(law) {
     });
   });
   const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
-  const resources = Array.isArray(law.resources) ? law.resources : [];
   tables.forEach((table, position) => {
     const text = String(table || "");
     const firstLine = text.split("\n")[0].trim();
-    const resource = resources[position] || null;
+    const resource = appendixResource(law, position);
     units.push({
       kind: "appendix_table",
       label: (firstLine || `別表${position + 1}`).slice(0, 40),
@@ -405,6 +404,19 @@ function lawUnits(law) {
     });
   });
   return units;
+}
+
+function appendixResource(law, position) {
+  const resources = Array.isArray(law.resources) ? law.resources : [];
+  const mapping = Array.isArray(law.appendix_table_resource_index) ? law.appendix_table_resource_index : null;
+  if (mapping) {
+    const index = mapping[position];
+    if (Number.isInteger(index) && index >= 0 && index < resources.length) {
+      return resources[index] || null;
+    }
+    return null;
+  }
+  return resources[position] || null;
 }
 
 function unitId(lawId, unit) {
@@ -674,7 +686,7 @@ async function callTool(env, name, args) {
     }
     const text = String(units[n - 1] || "");
     const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
-    const unitResource = kind === "appendix_table" && Array.isArray(law.resources) ? law.resources[n - 1] || null : null;
+    const unitResource = kind === "appendix_table" ? appendixResource(law, n - 1) : null;
     const contentStatus = kind === "appendix_table" && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
     return textResult(
       JSON.stringify(
@@ -752,8 +764,9 @@ async function callTool(env, name, args) {
           if (phrase.found) return { term: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
           if (exact) return { term: term.raw, found: false, approximate: false, start: -1, end: -1 };
           const loose = haystack.normalized.indexOf(term.normalized);
-          if (loose < 0) return { term: term.raw, found: false, approximate: true, start: -1, end: -1 };
-          return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+          if (loose >= 0) return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+          const gramsOk = term.bigrams.length > 0 && term.bigrams.every((gram) => haystack.normalized.includes(gram));
+          return { term: term.raw, found: gramsOk, approximate: true, start: -1, end: -1 };
         });
         return { unit, haystack, matches, matched: matches.filter((entry) => entry.found) };
       });
@@ -1021,8 +1034,12 @@ async function callTool(env, name, args) {
         const phrase = phraseMatchIn(haystack, term.normalized);
         if (phrase.found) return { raw: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
         if (rejectedByExact) return { raw: term.raw, found: false, approximate: false, start: -1, end: -1 };
+        // The candidate reached this point because every bigram of the term is
+        // present, so exact=false must keep it as an approximate hit even when
+        // the phrase never occurs contiguously (the 600点/500万円 shape from
+        // issue #52). There is simply no highlight position for it.
         const loose = haystack.normalized.indexOf(term.normalized);
-        if (loose < 0) return { raw: term.raw, found: false, approximate: true, start: -1, end: -1 };
+        if (loose < 0) return { raw: term.raw, found: true, approximate: true, start: -1, end: -1 };
         return { raw: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
       });
       const matched = verified.filter((entry) => entry.found);
