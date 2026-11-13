@@ -637,6 +637,10 @@ async function callTool(env, name, args) {
             title: chapter.title || "",
             text: chapter.text || "",
           })),
+          // Sections the city marks as deleted keep a heading but have no body.
+          // They belong to navigation, so the table of contents lists them
+          // instead of the parser reporting a lost structure (issue #50).
+          deleted_headings: Array.isArray(law.deleted_headings) ? law.deleted_headings : [],
           resources: resources.map((resource) =>
             resource
               ? { label: resource.label || "", href: resource.href || "", image_url: resource.image_url || "" }

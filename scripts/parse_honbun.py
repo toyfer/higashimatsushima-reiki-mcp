@@ -42,6 +42,16 @@ SUPPLEMENT_RE = re.compile(r"^附\s*則")
 # headings were flattening into the previous article's paragraph text.
 CHAPTER_LINE_RE = re.compile(r"^第([0-9０-９一二三四五六七八九十]+)章\s*(.*)$")
 SECTION_LINE_RE = re.compile(r"^第([0-9０-９一二三四五六七八九十]+)節\s*(.*)$")
+# A body heading line can carry the table-of-contents article range
+# ("第4節 学校の組織編成(第18条―第29条)") or a deletion marker ("第5節 鉱産税 削除")
+# that the chapter <div> does not. Both are noise when comparing a line with the
+# structure collected from the body HTML (issue #50).
+HEADING_RANGE_RE = re.compile(
+    r"[\(（]\s*第[0-9０-９一二三四五六七八九十百]+条(?:\s*[―–\-~〜]\s*第[0-9０-９一二三四五六七八九十百]+条)?\s*[\)）]\s*$"
+)
+# "(削除)", "削除" and "・削除" all mean the provision is gone, not that the
+# heading was lost, so the parser records it instead of warning.
+DELETED_HEADING_RE = re.compile(r"(?:[\(（]?\s*削除\s*[\)）]?|・\s*削除)\s*$")
 CHAPTER_HTML_RE = re.compile(
     r'<div class="(?:chapter|section)"><p[^>]*class="num">\s*<span[^>]*>([^<]+)</span>\s*<span[^>]*>([^<]*)</span>',
     re.S,
@@ -161,6 +171,21 @@ def split_leading_heading(rest: str) -> tuple[str, str]:
             if depth < 0:
                 return "", rest
     return "", rest
+
+
+def heading_identity(text: str) -> tuple[str, bool]:
+    """Return a heading line without TOC noise, and whether it is deleted.
+
+    ``第4節 学校の組織編成(第18条―第29条)`` is the table-of-contents spelling of a
+    heading the body carries without the range, and ``第5節 鉱産税 削除`` is a
+    section whose text was removed. Comparing the raw line with the body
+    structure failed for both and raised a spurious warning (issue #50).
+    """
+    base = HEADING_RANGE_RE.sub("", text).strip()
+    deleted = bool(DELETED_HEADING_RE.search(base))
+    if deleted:
+        base = DELETED_HEADING_RE.sub("", base).strip()
+    return base, deleted
 
 
 def parse_chapters(scope: str) -> list[dict[str, str]]:
@@ -329,6 +354,10 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     pending_heading = ""
     deferred_heading = ""
     structure_warnings: list[str] = []
+    # Headings that exist only to say the provision was deleted. They belong to
+    # navigation, not to an article body, and must not be reported as a lost
+    # structure (issue #50).
+    deleted_headings: list[str] = []
 
     def flush_article() -> None:
         nonlocal current_article
@@ -406,7 +435,15 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             # structure was lost, so warn instead of mixing it into a
             # body paragraph (issue #50).
             absorb_deferred_heading()
-            if any(line.startswith(text) for text in chapter_texts):
+            base, deleted = heading_identity(line)
+            if any(line.startswith(text) for text in chapter_texts) or any(
+                base == text or base.startswith(text) for text in chapter_texts
+            ):
+                continue
+            if deleted:
+                # 削除 sections have no body by definition, so this is not a
+                # lost heading: keep it for navigation and stay quiet.
+                deleted_headings.append(line)
                 continue
             structure_warnings.append(f"chapter_heading_unstructured:{line[:30]}")
             continue
@@ -559,6 +596,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "appendix_tables": appendix_tables,
         "appendix_styles": appendix_styles,
         "chapters": chapters,
+        "deleted_headings": deleted_headings,
         "resources": resources,
         # Explicit table -> resource mapping. Consumers must use this instead of
         # law.resources[n - 1] (issue #61).
