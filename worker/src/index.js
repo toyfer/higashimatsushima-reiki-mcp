@@ -764,8 +764,9 @@ async function callTool(env, name, args) {
           if (phrase.found) return { term: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
           if (exact) return { term: term.raw, found: false, approximate: false, start: -1, end: -1 };
           const loose = haystack.normalized.indexOf(term.normalized);
-          if (loose < 0) return { term: term.raw, found: false, approximate: true, start: -1, end: -1 };
-          return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+          if (loose >= 0) return { term: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
+          const gramsOk = term.bigrams.length > 0 && term.bigrams.every((gram) => haystack.normalized.includes(gram));
+          return { term: term.raw, found: gramsOk, approximate: true, start: -1, end: -1 };
         });
         return { unit, haystack, matches, matched: matches.filter((entry) => entry.found) };
       });
@@ -1033,8 +1034,12 @@ async function callTool(env, name, args) {
         const phrase = phraseMatchIn(haystack, term.normalized);
         if (phrase.found) return { raw: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
         if (rejectedByExact) return { raw: term.raw, found: false, approximate: false, start: -1, end: -1 };
+        // The candidate reached this point because every bigram of the term is
+        // present, so exact=false must keep it as an approximate hit even when
+        // the phrase never occurs contiguously (the 600点/500万円 shape from
+        // issue #52). There is simply no highlight position for it.
         const loose = haystack.normalized.indexOf(term.normalized);
-        if (loose < 0) return { raw: term.raw, found: false, approximate: true, start: -1, end: -1 };
+        if (loose < 0) return { raw: term.raw, found: true, approximate: true, start: -1, end: -1 };
         return { raw: term.raw, found: true, approximate: true, start: loose, end: loose + term.normalized.length };
       });
       const matched = verified.filter((entry) => entry.found);
