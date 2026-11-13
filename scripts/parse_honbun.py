@@ -54,16 +54,44 @@ APPENDIX_TABLE_RE = re.compile(r"^別表")
 APPENDIX_START_RE = re.compile(r"^別表(?:第?[0-9０-９]+|\s|[\(（]|$)")
 # Prose such as 別表に掲げる… must stay body text and must not raise a warning.
 APPENDIX_TITLE_HINT_RE = re.compile(r"^別表[0-9０-９第\(（]")
+# 様式第N号 sections are separate forms, not a continuation of the table that
+# happens to precede them (issue #61). Anchored on the 号 or an opening paren so
+# ordinary prose such as 様式は… stays body text.
+STYLE_SECTION_RE = re.compile(r"^様式(?:第?[0-9０-９]+号|[\(（])")
+APPENDIX_NUMBER_RE = re.compile(r"^別表(?:第)?([0-9０-９]+)")
 PARAGRAPH_RE = re.compile(r"^([0-9０-９]+)\s+(.+)$")
 ITEM_RE = re.compile(r"^[\(（]([0-9０-９]+)[\)）]\s*(.*)$")
 SUBITEM_RE = re.compile(r"^([アイウエオカキクケコサシスセソタチツテト])\s*(.*)$")
 DATE_NUMBER_SPLIT_RE = re.compile(r"^(.*?)\s+(.+)$")
+# Amendment notes such as (令8訓令甲23・一部改正) are parenthesised exactly like
+# a heading, so they were captured as deferred headings and, when a chapter
+# heading sat between them and the next article, became that article's heading
+# while also disappearing from the amended article's text (issue #61).
+AMENDMENT_ERA_RE = re.compile(r"^[\(（](?:明治|大正|昭和|平成|令和)\s*(?:[0-9０-９]+|元)")
+AMENDMENT_WORD_RE = re.compile(r"(?:一部改正|全部改正|全改|改正|改定|追加|削除|新旧対照)")
+AMENDMENT_NUMBER_RE = re.compile(r"第[0-9０-９]+号[\)）]$")
 
 ZEN = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 def to_int(value: str) -> int:
     return int(value.translate(ZEN))
+
+
+def is_amendment_note(line: str) -> bool:
+    """True for a parenthesised amendment note such as (令8訓令甲23・一部改正)."""
+    if not AMENDMENT_ERA_RE.match(line):
+        return False
+    if AMENDMENT_WORD_RE.search(line):
+        return True
+    return bool(AMENDMENT_NUMBER_RE.search(line))
+
+
+def appendix_table_number(label: str) -> int | None:
+    match = APPENDIX_NUMBER_RE.match(str(label or "").strip())
+    if not match:
+        return None
+    return to_int(match.group(1))
 
 
 def clean_title(value: str) -> str:
@@ -130,9 +158,9 @@ def parse_chapters(scope: str) -> list[dict[str, str]]:
     return chapters
 
 
-def parse_resources(scope: str, source_url: str) -> list[dict[str, str]]:
+def parse_resources(scope: str, source_url: str) -> list[dict[str, Any]]:
     """Collect RTF/PNG form resources referenced by appendix headings."""
-    resources: list[dict[str, str]] = []
+    resources: list[dict[str, Any]] = []
     images = [m.group(1) for m in XREF_IMG_RE.finditer(scope)]
     for position, (href, name, suffix) in enumerate(FORM_SECTION_RE.findall(scope), start=1):
         label = f"{name}{suffix}".strip()
@@ -146,15 +174,43 @@ def parse_resources(scope: str, source_url: str) -> list[dict[str, str]]:
                 if stem and candidate.startswith(stem):
                     image = candidate
                     break
+        # Identity, not just order: appendix tables and 様式 share this list but
+        # do not correspond to law.appendix_tables one-to-one (issue #61).
+        kind = "appendix" if label.startswith("別表") else "form"
         resources.append(
             {
                 "label": label,
+                "kind": kind,
+                "table_number": appendix_table_number(label) if kind == "appendix" else None,
+                "seq": position,
                 "href": href,
                 "image_url": image,
                 "source_url": source_url,
             }
         )
     return resources
+
+
+def build_resource_map(appendix_tables: list[str], resources: list[dict[str, Any]]) -> list[int | None]:
+    """Map each appendix table to the resource that belongs to it.
+
+    ``law.resources[n - 1]`` assumed the two lists line up in length and order,
+    which breaks as soon as HTML tables and form_section (RTF/PNG) tables are
+    mixed in one ordinance (issue #61). Match by 別表 number instead and leave
+    the entry null when no resource claims that table.
+    """
+    by_number: dict[int, int] = {}
+    for position, resource in enumerate(resources):
+        if resource.get("kind") != "appendix":
+            continue
+        number = resource.get("table_number")
+        if isinstance(number, int) and number not in by_number:
+            by_number[number] = position
+    mapping: list[int | None] = []
+    for table in appendix_tables:
+        number = appendix_table_number(table)
+        mapping.append(by_number.get(number) if number is not None else None)
+    return mapping
 
 
 def history_scope(html: str) -> str | None:
@@ -223,6 +279,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     articles: list[dict[str, Any]] = []
     supplements: list[str] = []
     appendix_tables: list[str] = []
+    appendix_styles: list[str] = []
     current_chapter: dict[str, str] | None = None
     chapter_index = 0
     mode = "preamble"
@@ -237,6 +294,26 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             current_article["text"] = "\n".join(current_article.pop("_lines")).strip()
             articles.append(current_article)
             current_article = None
+
+    def absorb_deferred_heading() -> None:
+        """Attach a held-back heading to the block that is ending.
+
+        A pending heading must never cross a structural boundary. Before
+        issue #61 it survived a chapter heading and landed on the next article,
+        and the amendment note it came from was lost from the article body.
+        """
+        nonlocal deferred_heading
+        if not deferred_heading:
+            return
+        if current_article is not None:
+            current_article["_lines"].append(deferred_heading)
+        elif mode == "supplement" and supplements:
+            supplements[-1] = supplements[-1] + "\n" + deferred_heading
+        elif mode == "appendix" and appendix_tables:
+            appendix_tables[-1] = appendix_tables[-1] + "\n" + deferred_heading
+        elif mode == "style" and appendix_styles:
+            appendix_styles[-1] = appendix_styles[-1] + "\n" + deferred_heading
+        deferred_heading = ""
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -254,6 +331,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             and not ITEM_RE.match(line)
             and mode in {"preamble", "article"}
             and not APPENDIX_TABLE_RE.match(line)
+            and not is_amendment_note(line)
         ):
             # A heading line introduces the article that follows it. Keep it for
             # that article only and never append it to the article already being
@@ -269,6 +347,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         # the previous article (issue #50). Skip it and remember it for
         # the articles that follow.
         if line in chapter_texts:
+            absorb_deferred_heading()
             if chapter_index < len(chapters):
                 current_chapter = chapters[chapter_index]
                 chapter_index += 1
@@ -279,6 +358,7 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             # chapter line that the body scope did not provide means the
             # structure was lost, so warn instead of mixing it into a
             # body paragraph (issue #50).
+            absorb_deferred_heading()
             if any(line.startswith(text) for text in chapter_texts):
                 continue
             structure_warnings.append(f"chapter_heading_unstructured:{line[:30]}")
@@ -329,13 +409,24 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             continue
 
         if SUPPLEMENT_RE.match(line):
+            absorb_deferred_heading()
             flush_article()
             mode = "supplement"
             supplements.append(line)
             continue
 
+        if STYLE_SECTION_RE.match(line):
+            # 様式第N号 is its own form. Concatenating it onto the last appendix
+            # table corrupted that table's body (issue #61).
+            absorb_deferred_heading()
+            flush_article()
+            mode = "style"
+            appendix_styles.append(line)
+            continue
+
         if APPENDIX_TABLE_RE.match(line):
             if APPENDIX_START_RE.match(line):
+                absorb_deferred_heading()
                 flush_article()
                 mode = "appendix"
                 appendix_tables.append(line)
@@ -371,6 +462,9 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         elif mode == "appendix":
             if appendix_tables:
                 appendix_tables[-1] = appendix_tables[-1] + "\n" + line
+        elif mode == "style":
+            if appendix_styles:
+                appendix_styles[-1] = appendix_styles[-1] + "\n" + line
 
     flush_article()
 
@@ -398,8 +492,6 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
     if resources and appendix_only_headings:
         for table in appendix_only_headings:
             parse_warnings.append(f"external_resource_only:{table[:30]}")
-    elif appendix_only_headings and resources:
-        pass
     history = parse_history(html)
     if not history and history_scope(html) is not None:
         parse_warnings.append("history_table_empty_or_unrecognized")
@@ -418,8 +510,12 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         "article_count": len(articles),
         "supplements": supplements,
         "appendix_tables": appendix_tables,
+        "appendix_styles": appendix_styles,
         "chapters": chapters,
         "resources": resources,
+        # Explicit table -> resource mapping. Consumers must use this instead of
+        # law.resources[n - 1] (issue #61).
+        "appendix_table_resource_index": build_resource_map(appendix_tables, resources),
         "history": history,
         "plain_text": plain_text,
         "text_sha256": hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),
