@@ -59,6 +59,54 @@
       "must_include": [],
       "must_exclude": [],
       "note": "True zero: completeness must be complete, not partial"
+    },
+    {
+      "name": "appendix-external-resource-surfaced",
+      "query": "別表第4",
+      "args": { "limit": 5 },
+      "must_include": ["r122RG00000769"],
+      "must_include_status": ["external_resource_only"],
+      "note": "RTF のみの別表は content_status=external_resource_only として返り、本文があるかのように見えない"
+    },
+    {
+      "name": "appendix-body-kept-from-form",
+      "query": "文書編綴基準表",
+      "args": { "limit": 5 },
+      "must_include": ["r122RG00000769"],
+      "must_include_labels": ["別表第1(第20条関係)"],
+      "must_exclude_labels": ["別表第4(第21条関係)"],
+      "note": "本文を持つ別表第1と RTF のみの別表第4を取り違えない（#61）"
+    },
+    {
+      "name": "amount-boundary-thousands",
+      "query": "600万円",
+      "args": { "limit": 5 },
+      "must_exclude": ["r122RG00000486"],
+      "note": "3,600万円 を含む条例を 600万円 の完全一致として返さない"
+    },
+    {
+      "name": "law-scope-single-fetch",
+      "query": "文書",
+      "args": { "law_id": "r122RG00000769", "limit": 5 },
+      "must_include": ["r122RG00000769"],
+      "must_exclude": ["r122RG00001954"],
+      "max_fetches": 1,
+      "note": "law_id 指定は 1 fetch で完結し、他の条例を混ぜない"
+    },
+    {
+      "name": "scope-law-aggregation",
+      "query": "別表第2 級別",
+      "args": { "scope": "law", "limit": 5 },
+      "must_include": ["r122RG00000308"],
+      "note": "scope=law は条と別表をまたいで語が揃う条例を返す"
+    },
+    {
+      "name": "ranking-negation-first",
+      "query": "還付しない",
+      "args": { "limit": 10 },
+      "must_include": ["r122RG00000234"],
+      "must_rank_first": "r122RG00000234",
+      "note": "公園条例第14条（還付しない）が1位。還付した を含む下水道事業会計規則が上に来ない（#52）"
     }
   ]
 }

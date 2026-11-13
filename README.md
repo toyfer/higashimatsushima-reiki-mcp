@@ -126,6 +126,9 @@ python3 tools/verify_structure.py --sample 10
 | `worker/test/index.test.mjs` | Worker tests with mocked Pages responses |
 | `.github/workflows/deploy-worker.yml` | Worker deploy, published-index precondition, endpoint verification |
 | `tests/` | Network-free parser and checker tests |
+| `tests/fixtures/search_golden.json` | Golden-set cases for the body search evaluation |
+| `tools/search_eval.mjs` | Golden-set run of the Worker against the published index |
+| `.github/workflows/search-eval.yml` | Golden-set run after each successful Pages publish |
 
 ## Deploy order and verification
 
