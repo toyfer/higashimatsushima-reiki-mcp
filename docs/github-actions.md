@@ -14,6 +14,33 @@ That is 03:17 JST. The minute is deliberately not `0`, because top-of-hour sched
 
 Scheduled workflows only run from the default branch. Push these files to the repository default branch before expecting the daily run to appear.
 
+### Deploy triggers
+
+`pages.yml` has three automated paths to the published API, so a merged fix no longer waits for a manual dispatch:
+
+| Trigger | Mode | Why |
+|---|---|---|
+| Push to `main` that touches a parser, index or builder script | full build | The pushed diff is inspected in the guard step, because a path filter cannot tell a script edit from a status-only update |
+| `workflow_call` from `daily-reiki-check.yml` | full build | Fires only when the menu hash or the content date changed, so quiet days still cost one request |
+| `schedule` | full build | Weekly insurance for body-only replacements that leave the menu hash and the content date untouched |
+
+The weekly run is `17 19 * * 6` in UTC, which is Sunday 04:17 JST, one hour after the daily check so the two runs never queue behind each other. A scheduled run always builds the full API; it is not a cheap check.
+
+A push that only refreshes `data/status/latest.json` still takes the 5-ordinance sample path.
+
+### Sample downgrade guard
+
+The 5-ordinance sample is only safe while nothing larger is published. Before building, the guard step reads the published `api/health.json` with a per-run cache buster and `Cache-Control: no-cache`, so a CDN copy from before the last full deployment cannot be mistaken for the current state.
+
+| Published `law_count` | Event | Result |
+|---|---|---|
+| any | `schedule`, `workflow_call` or `workflow_dispatch` with `full_build=true`, or a push that changed a parser/builder script | full build |
+| more than 5 | push or manual sample run without `allow_sample_overwrite` | skip the build and keep the published API |
+| more than 5 | manual run with `allow_sample_overwrite=true` | sample build, with a warning in the run log |
+| 5 or fewer | push or manual sample run | sample build |
+
+If `health.json` is unreachable, or `law_count` cannot be parsed as a non-negative integer, the job fails instead of deploying. Failing closed is deliberate: an unreadable state must never be read as "nothing published yet".
+
 ### Why check mode is the daily default
 
 Fetching every ordinance body every day would put unnecessary load on the city site and make most runs meaningless. The menu page carries the site current date. The checker stores the menu hash and current date in `data/status/latest.json`.
@@ -48,7 +75,8 @@ Repository settings must also allow GitHub Actions to create commits with `GITHU
 2. Run the workflow manually with `mode=collect` and `force_collect=false` once. This builds the first ordinance URL list.
 3. Confirm `data/status/latest.json` contains `current_date`, `law_count` and `laws`.
 4. Run it manually again with `mode=check`. It should report no crawl unless the menu changed.
-5. Leave the schedule enabled.
+5. After merging a parser, index or builder change, confirm the push-triggered full build ran, or dispatch the workflow manually with `full_build=true`.
+6. Leave the schedule enabled.
 
 ### Troubleshooting
 
@@ -58,3 +86,5 @@ Repository settings must also allow GitHub Actions to create commits with `GITHU
 | Commit step fails | Check Actions workflow permissions and branch protection. |
 | Failure issue repeats | Open the latest run and check whether the city site fetch failed, index pages failed, or the count dropped sharply. |
 | `law_count` is zero | The index HTML structure may have changed. Inspect `reiki_taikei/taikei_default.html` links before changing the parser. |
+| Sample deploy skipped | The published API has more than 5 laws and this run was a push or a sample dispatch. This is the guard working; dispatch with `full_build=true` to refresh the full API. |
+| Weekly build failed | A scheduled run always builds the full API. Check the failure count in the run summary before dispatching manually. |
