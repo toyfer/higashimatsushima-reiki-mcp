@@ -117,21 +117,47 @@ async function fetchPagesJson(env, path, options = {}) {
 }
 
 function normalize(value) {
-  return String(value || "").toLowerCase().replace(/\s+/g, "");
+  return String(value || "").normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+}
+
+// Title queries are split on whitespace so that non-contiguous words still match.
+// NFKC folds full-width digits and the ideographic space, so "条例第１号" and
+// "東松島　契約" behave like their half-width equivalents (issue #94).
+function titleTerms(query) {
+  return String(query || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.replace(/\s+/g, ""))
+    .filter(Boolean);
 }
 
 function scoreLaw(law, query) {
-  const q = normalize(query);
-  if (!q) return 0;
+  const terms = titleTerms(query);
+  if (!terms.length) return 0;
   const title = normalize(law.title);
   const number = normalize(law.ordinance_number);
   const lawId = normalize(law.id);
   const classification = normalize(law.classification);
-  if (title === q || number === q || lawId === q) return 100;
-  if (title.includes(q)) return 80;
-  if (number.includes(q) || lawId.includes(q)) return 70;
-  if (classification.includes(q)) return 40;
-  return 0;
+  if (terms.length === 1) {
+    const q = terms[0];
+    if (title === q || number === q || lawId === q) return 100;
+    if (title.includes(q)) return 80;
+    if (number.includes(q) || lawId.includes(q)) return 70;
+    if (classification.includes(q)) return 40;
+    return 0;
+  }
+  const joined = terms.join("");
+  if (title === joined) return 100;
+  let titleHits = 0;
+  for (const term of terms) {
+    const inTitle = title.includes(term);
+    const inMeta = number.includes(term) || lawId.includes(term) || classification.includes(term);
+    if (!inTitle && !inMeta) return 0;
+    if (inTitle) titleHits += 1;
+  }
+  if (titleHits === terms.length) return title.includes(joined) ? 90 : 85;
+  return 50 + Math.round((10 * titleHits) / terms.length);
 }
 
 function fnv1a32(value) {
