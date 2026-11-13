@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -52,15 +53,20 @@ class LinkParser(HTMLParser):
             self._text = []
 
 
-def is_retryable(exc: BaseException) -> bool:
+def is_retryable(exc: Exception) -> bool:
     """A transient failure worth another attempt; 4xx is not."""
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code in RETRYABLE_STATUS
-    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError))
+    # http.client.HTTPException covers IncompleteRead and BadStatusLine, which a
+    # truncated chunked response raises instead of URLError (issue #80).
+    return isinstance(
+        exc,
+        (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException),
+    )
 
 
 def fetch_text(url: str, timeout: int = 30) -> tuple[str, str]:
-    last_error: BaseException | None = None
+    last_error: Exception | None = None
     for attempt in range(RETRY_ATTEMPTS):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -70,7 +76,7 @@ def fetch_text(url: str, timeout: int = 30) -> tuple[str, str]:
             text = raw.decode(charset, errors="replace")
             digest = hashlib.sha256(raw).hexdigest()
             return text, digest
-        except BaseException as exc:  # noqa: BLE001 - re-raised below when not retryable
+        except Exception as exc:  # noqa: BLE001 - re-raised below when not retryable
             last_error = exc
             if not is_retryable(exc) or attempt == RETRY_ATTEMPTS - 1:
                 raise

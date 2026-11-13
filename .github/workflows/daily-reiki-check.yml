@@ -212,6 +212,10 @@ jobs:
       contents: read
       pages: write
       id-token: write
+      # pages.yml downloads the status artifact passed by this job; a called
+      # workflow cannot exceed the caller's permissions, so this is required
+      # (issue #80).
+      actions: read
     uses: ./.github/workflows/pages.yml
     with:
       full_build: true

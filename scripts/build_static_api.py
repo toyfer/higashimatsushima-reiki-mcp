@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -162,7 +163,7 @@ def main() -> int:
     try:
         menu_html, menu_hash = fetch_text(MENU_URL)
         current_date = extract_current_date(menu_html)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         print(f"WARNING: menu fetch failed: {exc!r}", file=sys.stderr)
         menu_hash = str(status.get("menu_sha256", ""))
         current_date = str(status.get("current_date", ""))
@@ -198,7 +199,7 @@ def main() -> int:
             continue
         try:
             html, _digest = fetch_text(url)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             failures.append({"id": law_id, "url": url, "error": repr(exc)})
             if args.fail_on_error:
                 return 3
