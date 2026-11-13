@@ -16,6 +16,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
 
+# Errors worth recording as a page error instead of aborting the crawl. HTTPException
+# (IncompleteRead, BadStatusLine, ...) does not inherit from OSError (issue #101).
+FETCH_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
+
 MENU_URL = "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html"
 TAIKEI_URL = "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_taikei/taikei_default.html"
 USER_AGENT = "higashimatsushima-reiki-mcp/0.1 (+daily public-page change check)"
@@ -135,7 +139,7 @@ def collect_from_taikei(max_pages: int, delay_seconds: float) -> dict[str, objec
         visited.add(page_url)
         try:
             html, _ = fetch_text(page_url)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except FETCH_ERRORS as exc:
             page_errors.append({"url": page_url, "error": repr(exc)})
             continue
 
@@ -200,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         menu_html, menu_hash = fetch_text(args.menu_url)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except FETCH_ERRORS as exc:
         print(f"ERROR: failed to fetch menu: {exc!r}", file=sys.stderr)
         set_github_output("status", "fetch_failed")
         return 2

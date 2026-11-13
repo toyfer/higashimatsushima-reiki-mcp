@@ -288,5 +288,40 @@ class DailyCheckMainTest(unittest.TestCase):
         self.assertEqual(text, sentinel)
 
 
+class FetchExceptionScopeTest(unittest.TestCase):
+    def test_http_exception_is_part_of_the_crawl_error_scope(self) -> None:
+        # HTTPException is not an OSError subclass, so it must be listed explicitly (issue #101).
+        self.assertFalse(issubclass(http.client.HTTPException, OSError))
+        self.assertIn(http.client.HTTPException, daily_check.FETCH_ERRORS)
+
+    def test_collect_records_http_exception_as_page_error(self) -> None:
+        original = daily_check.fetch_text
+
+        def fake_fetch(url: str):
+            raise http.client.IncompleteRead(b"partial")
+
+        daily_check.fetch_text = fake_fetch  # type: ignore[assignment]
+        try:
+            result = daily_check.collect_from_taikei(max_pages=5, delay_seconds=0)
+        finally:
+            daily_check.fetch_text = original  # type: ignore[assignment]
+        self.assertEqual(len(result["page_errors"]), 1)
+        self.assertIn("IncompleteRead", result["page_errors"][0]["error"])
+        self.assertFalse(result["crawl_complete"])
+
+    def test_menu_http_exception_returns_exit_code_2(self) -> None:
+        test = DailyCheckMainTest("test_empty_collection_returns_4_and_preserves_output")
+        try:
+            code, _output, text, sentinel, _calls = test.run_main(
+                DailyCheckMainTest.previous_status(100),
+                menu_error=http.client.IncompleteRead(b"partial"),
+                collection=_collection(100),
+            )
+        finally:
+            test.doCleanups()
+        self.assertEqual(code, 2)
+        self.assertEqual(text, sentinel)
+
+
 if __name__ == "__main__":
     unittest.main()

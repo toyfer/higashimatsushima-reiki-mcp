@@ -21,10 +21,11 @@ a{color:#1d4ed8}
 <li><a href="api/laws/index.json"><code>api/laws/index.json</code></a></li>
 <li><a href="api/search/title-index.json"><code>api/search/title-index.json</code></a></li>
 <li><a href="api/search/manifest.json"><code>api/search/manifest.json</code></a></li>
-<li><code>api/search/postings-{00..15}.json</code></li>
-<li><code>api/search/chunks-{000..040}.json</code></li>
+<li><code>api/search/postings-{00..NN}.json</code></li>
+<li><code>api/search/chunks-{000..NNN}.json</code></li>
 <li><code>api/laws/{law_id}.json</code></li>
 </ul>
+<p>シャード数は固定ではありません。実際の本数は <a href="api/search/manifest.json"><code>api/search/manifest.json</code></a> の <code>posting_shards</code> と、<code>chunk_count</code> ÷ <code>chunk_shard_size</code> から求めたチャンクシャード数で決まります。</p>
 <h2>例</h2>
 <pre>GET /api/meta.json
 GET /api/laws/index.json
