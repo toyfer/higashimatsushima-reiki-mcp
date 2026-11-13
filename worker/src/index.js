@@ -824,6 +824,10 @@ async function callTool(env, name, args) {
               highlights: window.highlights,
               match_type: match.approximate ? "approximate" : "exact",
               content_status: entry.unit.content_status || "complete",
+              // Evidence entries must carry their own resource: the top level
+              // copies the first entry and used to fall back to null here
+              // (issue #76).
+              resource: entry.unit.resource || null,
             });
           }
         }
@@ -1118,26 +1122,32 @@ async function callTool(env, name, args) {
             highlights: window.highlights,
             match_type: entry.approximate ? "approximate" : "exact",
             content_status: row.content_status || "complete",
+            resource: row.resource || null,
           });
         }
         const satisfied =
           operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : group.matches.size > 0;
         if (satisfied && !results.some((item) => item.law_id === lawId)) {
-          const window = buildSearchWindow(haystack, termMatches.slice(0, 1), snippetWindow);
           const groupMatches = [...group.matches.values()];
+          // Describe the law-level row with the evidence of the first matched
+          // term. Mixing the last scanned chunk's label with the first term's
+          // snippet made content_status and resource disagree with each other
+          // (issue #76).
+          const primary = groupMatches[0];
           results.push({
             law_id: lawId,
             title: row.title,
-            label: row.label,
-            heading: row.heading || "",
-            kind: row.kind || "",
+            label: primary.label,
+            heading: primary.heading || "",
+            kind: primary.kind || "",
+            unit_id: primary.unit_id,
             source_url: row.source_url || "",
             score: group.score,
-            snippet: window.snippet,
-            highlights: window.highlights,
+            snippet: primary.snippet,
+            highlights: primary.highlights,
             match_type: groupMatches.every((item) => item.match_type === "exact") ? "exact" : "approximate",
-            content_status: row.content_status || "complete",
-            resource: row.resource || null,
+            content_status: primary.content_status || "complete",
+            resource: primary.resource || null,
             matched_terms: [...group.matches.keys()],
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
             matches: groupMatches,

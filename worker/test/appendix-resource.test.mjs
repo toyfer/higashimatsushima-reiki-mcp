@@ -128,6 +128,27 @@ test("law scoped content search carries the appendix resource and status", async
   }
 });
 
+test("law scoped search keeps the resource when scope=law", async () => {
+  const restore = installPages();
+  try {
+    const payload = await callTool("search_laws_by_content", {
+      law_id: MAPPED_LAW.id,
+      query: "別表第2",
+      scope: "law",
+    });
+    const row = payload.results[0];
+    assert.ok(row, JSON.stringify(payload.results));
+    // The top level copies the first evidence entry, so both must carry the
+    // resource an external-only table was published with (issue #76).
+    assert.equal(row.content_status, "external_resource_only");
+    assert.equal(row.resource?.href, "honbun_2.rtf");
+    assert.equal(row.matches[0].resource?.href, "honbun_2.rtf");
+    assert.equal(row.matches[0].content_status, "external_resource_only");
+  } finally {
+    restore();
+  }
+});
+
 test("laws published before the mapping existed keep the positional fallback", async () => {
   const restore = installPages();
   try {
