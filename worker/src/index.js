@@ -168,18 +168,35 @@ function parseSearchTerms(query) {
     .filter((term) => term.normalized.length > 0);
 }
 
+const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+// Folding every character with normalize("NFKC") plus a per-character regex was
+// the dominant cost while verifying hundreds of candidates, and Japanese
+// ordinance text repeats the same few thousand characters. Cache the folded
+// form per character instead (issue #78).
+const FOLDED_CHAR_CACHE = new Map();
+const FOLDED_CHAR_CACHE_LIMIT = 20000;
+
+function foldedWordChar(char) {
+  const cached = FOLDED_CHAR_CACHE.get(char);
+  if (cached !== undefined) return cached;
+  const folded = char.normalize("NFKC").toLowerCase();
+  const value = WORD_CHAR_RE.test(folded) ? folded : "";
+  if (FOLDED_CHAR_CACHE.size >= FOLDED_CHAR_CACHE_LIMIT) FOLDED_CHAR_CACHE.clear();
+  FOLDED_CHAR_CACHE.set(char, value);
+  return value;
+}
+
 function normalizeWithMap(text) {
   const original = String(text || "");
   let normalized = "";
   const map = [];
   for (let index = 0; index < original.length; index += 1) {
-    const folded = original[index].normalize("NFKC").toLowerCase();
-    for (const char of folded) {
-      if (/[\p{L}\p{N}]/u.test(char)) {
-        normalized += char;
-        map.push(index);
-      }
-    }
+    const folded = foldedWordChar(original[index]);
+    if (!folded) continue;
+    normalized += folded;
+    // NFKC can expand one character into several (㍻ into 平成), so every output
+    // character points back at the original index it came from.
+    for (let offset = 0; offset < folded.length; offset += 1) map.push(index);
   }
   return { original, normalized, map };
 }
@@ -987,16 +1004,26 @@ async function callTool(env, name, args) {
         gramChunks.set(gram, chunks);
       }
     }
+    // Resolve each term's gram sets once: the previous version allocated a Set
+    // per gram and per candidate, twice, on every call (issue #78).
+    const termGramLookups = terms.map((term) => term.bigrams.map((gram) => gramChunks.get(gram)));
     const gramComplete = (index) =>
-      terms.every(
-        (term) => term.bigrams.length > 0 && term.bigrams.every((gram) => (gramChunks.get(gram) || new Set()).has(index))
+      termGramLookups.every(
+        (lookups) => lookups.length > 0 && lookups.every((chunks) => Boolean(chunks) && chunks.has(index))
       );
     const ranked = [...scores.entries()]
       .sort((a, b) => b[1] - a[1] || a[0] - b[0])
       .map(([index]) => index);
     // Candidates holding every bigram of every term are cheap to verify and far
     // more likely to satisfy AND, so they are walked before coincidental hits.
-    const rankedIndexes = [...ranked.filter(gramComplete), ...ranked.filter((index) => !gramComplete(index))];
+    // One pass keeps the same order without filtering twice.
+    const completeIndexes = [];
+    const partialIndexes = [];
+    for (const index of ranked) {
+      if (gramComplete(index)) completeIndexes.push(index);
+      else partialIndexes.push(index);
+    }
+    const rankedIndexes = [...completeIndexes, ...partialIndexes];
     const byShard = new Map();
     for (const index of rankedIndexes) {
       const shard = Math.floor(index / chunkShardSize);
