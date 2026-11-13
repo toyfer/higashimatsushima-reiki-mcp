@@ -45,6 +45,11 @@ on:
         type: string
   workflow_call:
     inputs:
+      status_artifact:
+        description: 'Artifact name holding data/status from the calling workflow. When set, the status is restored and index collection is skipped'
+        required: false
+        default: ''
+        type: string
       full_build:
         description: 'Build every ordinance body into site/api before deploying'
         required: false
@@ -65,6 +70,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: github-pages
@@ -85,9 +91,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          # Two commits are enough to diff a push against its parent and detect
-          # builder/parser changes without cloning the whole history.
-          fetch-depth: 2
+          # Full history: a merged pull request makes github.event.before the
+          # tip of the previous branch tip, which can be many commits back, and
+          # a shallow clone would make the diff below silently skip the build.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -182,14 +189,26 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Index changed: $changed"
 
+      - name: Restore status from the calling workflow
+        if: inputs.status_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.status_artifact }}
+          path: data/status
+
       - name: Collect ordinance index
-        if: steps.guard.outputs.mode == 'full'
+        # Skipped when the caller already crawled the index pages and handed
+        # over the fresh status file, so a changed day does not crawl 74 pages
+        # twice and never builds from the pre-commit status.
+        if: steps.guard.outputs.mode == 'full' && inputs.status_artifact == ''
         run: python scripts/daily_check.py --mode collect --delay 0.35
 
       - name: Build full static API
         if: steps.guard.outputs.mode == 'full'
         env:
-          BUILD_DELAY: ${{ inputs.delay_seconds }}
+          # push and schedule events have no inputs, so the fallback is required
+          # or the empty string reaches --delay and the script exits at once.
+          BUILD_DELAY: ${{ inputs.delay_seconds || '0.35' }}
         run: python scripts/build_static_api.py --delay "$BUILD_DELAY" --fail-on-error
 
       - name: Build sample static API
