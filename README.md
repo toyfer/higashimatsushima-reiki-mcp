@@ -123,7 +123,7 @@ python3 tools/verify_structure.py --sample 10
 | `data/status/latest.json` | Last known menu hash, site current date and ordinance URL list |
 | `site/index.html` | Human-readable entry page for the static API |
 | `worker/src/index.js` | Stateless MCP Worker over the published static API |
-| `worker/test/index.test.mjs` | Worker tests with mocked Pages responses |
+| `worker/test/` | Worker unit and Python-to-Worker contract tests |
 | `.github/workflows/deploy-worker.yml` | Worker deploy, published-index precondition, endpoint verification |
 | `tests/` | Network-free parser and checker tests |
 | `tests/fixtures/search_golden.json` | Golden-set cases for the body search evaluation |

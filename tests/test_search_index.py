@@ -2,18 +2,55 @@ import json
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import search_index
-from search_index import build_search_index, chunk_law, text_bigrams
+from search_index import SearchIndexBuilder, build_search_index, chunk_law, text_bigrams
+
+
+RESOURCE = {"label": "様式第1号", "href": "https://example.test/sample.rtf", "image_url": "https://example.test/sample.png"}
+FORM_RESOURCE = {"label": "様式第1号(第14条関係)", "href": "https://example.test/form1.rtf"}
+SECOND_FORM_RESOURCE = {"label": "様式第2号(第15条関係)", "href": "https://example.test/form2.rtf"}
+TABLE_RESOURCE = {"label": "別表第3(第9条関係)", "href": "https://example.test/table3.rtf"}
 
 
 def law(**kw):
-    base = {"id": "r122RG00000001", "title": "テスト条例", "source_url": "https://example.invalid/1.html", "articles": [], "appendix_tables": [], "supplements": [], "preamble": [], "body_text": ""}
+    base = {
+        "id": "r122RG00000001",
+        "title": "テスト条例",
+        "source_url": "https://example.invalid/1.html",
+        "articles": [],
+        "appendix_tables": [],
+        "supplements": [],
+        "preamble": [],
+        "body_text": "",
+    }
     base.update(kw)
     return base
+
+
+def build_decision_law(resources=None):
+    return law(
+        id="r122RG00000070",
+        title="東松島市事務決裁規程",
+        source_url="https://example.test/r122RG00000070",
+        articles=[
+            {
+                "label": "第1条",
+                "heading": "(趣旨)",
+                "text": "この規程は、事務の決裁に関し必要な事項を定めるものとする。",
+            }
+        ],
+        appendix_tables=[
+            "別表第1 決裁区分\n課長 100万円以下\n部長 500万円以下",
+            "(様式第1号) 別に定める",
+        ],
+        resources=resources or [],
+        supplements=["この規程は、公布の日から施行する。"],
+    )
 
 
 class ChunkLawTest(unittest.TestCase):
@@ -53,7 +90,12 @@ class ChunkLawTest(unittest.TestCase):
         self.assertEqual(chunks[0]["label"], "前文")
 
     def test_preamble_and_articles_coexist(self):
-        chunks = chunk_law(law(preamble=["この条例は、契約事務の適正化を目的として必要な事項を定める前文である。"], articles=[{"label": "第1条", "heading": "(趣旨)", "text": "第1条 本文。", "paragraphs": []}]))
+        chunks = chunk_law(
+            law(
+                preamble=["この条例は、契約事務の適正化を目的として必要な事項を定める前文である。"],
+                articles=[{"label": "第1条", "heading": "(趣旨)", "text": "第1条 本文。", "paragraphs": []}],
+            )
+        )
         labels = [c["label"] for c in chunks]
         self.assertIn("前文", labels)
         self.assertIn("第1条", labels)
@@ -61,7 +103,18 @@ class ChunkLawTest(unittest.TestCase):
     def test_long_article_is_split_by_paragraph(self):
         long_a = "予定価格の決定に関する説明。" * 60
         long_b = "契約締結の手続に関する説明。" * 60
-        chunks = chunk_law(law(articles=[{"label": "第2条", "heading": "(契約)", "text": "", "paragraphs": [{"number": 1, "text": long_a, "items": []}, {"number": 2, "text": long_b, "items": []}]}]))
+        chunks = chunk_law(
+            law(
+                articles=[
+                    {
+                        "label": "第2条",
+                        "heading": "(契約)",
+                        "text": "",
+                        "paragraphs": [{"number": 1, "text": long_a, "items": []}, {"number": 2, "text": long_b, "items": []}],
+                    }
+                ]
+            )
+        )
         self.assertEqual(len(chunks), 2)
         self.assertEqual([c["label"] for c in chunks], ["第2条 第1項", "第2条 第2項"])
         self.assertTrue(all(c["kind"] == "article_paragraph" for c in chunks))
@@ -85,52 +138,41 @@ class ChunkLawTest(unittest.TestCase):
 
 class PostingBuildTest(unittest.TestCase):
     def test_many_articles_in_one_law_do_not_fill_a_posting(self):
-        laws = []
-        for n in range(12):
-            laws.append(law(id=f"r122RG000001{n:02d}", title="多数条条例", articles=[{"label": f"第{i}条", "heading": "", "text": f"第{i}条 監査について定める。", "paragraphs": []} for i in range(1, 8)]))
-        # Unrelated chunks keep the shared term from being an artefact of a
-        # tiny corpus, the way the full corpus dilutes common terms.
-        for n in range(30):
-            laws.append(law(id=f"r122RG000002{n:02d}", title="無関係条例", articles=[{"label": "第1条", "heading": "", "text": "第1条 手数料の額を定める。", "paragraphs": []}]))
+        laws = [
+            law(
+                id=f"r122RG000001{n:02d}",
+                title="多数条条例",
+                articles=[{"label": f"第{i}条", "heading": "", "text": f"第{i}条 監査について定める。", "paragraphs": []} for i in range(1, 8)],
+            )
+            for n in range(12)
+        ]
+        laws.extend(
+            law(id=f"r122RG000002{n:02d}", title="無関係条例", articles=[{"label": "第1条", "heading": "", "text": "第1条 手数料の額を定める。", "paragraphs": []}])
+            for n in range(30)
+        )
         laws.append(law(id="r122RG00000999", title="関連条例", articles=[{"label": "第1条", "heading": "", "text": "第1条 監査について定める。", "paragraphs": []}]))
         built = build_search_index(laws).build(data_version="v1", generated_at_utc="t")
-        posting_files = list(built["postings"].values())
-        hits = []
-        for f in posting_files:
-            if "監査" in f["terms"]:
-                hits = f["terms"]["監査"]
+        hits = next((f["terms"]["監査"] for f in built["postings"].values() if "監査" in f["terms"]), [])
         self.assertTrue(hits)
-        chunk_by_index = {}
-        for cf in built["chunks"].values():
-            for row in cf["chunks"]:
-                chunk_by_index[row["i"]] = row
+        chunk_by_index = {row["i"]: row for cf in built["chunks"].values() for row in cf["chunks"]}
         law_ids = [chunk_by_index[i]["law_id"] for i, _ in hits]
         self.assertIn("r122RG00000999", law_ids)
-        from collections import Counter
         self.assertLessEqual(max(Counter(law_ids).values()), 3)
 
     def test_short_rule_beats_repetitive_table_for_amount_query(self):
-        # A salary-style table repeats digit bigrams hundreds of times. For a
-        # practical query the short chunk stating the threshold rule must win
-        # once length normalization is applied, and the table must stay in the
-        # postings (normalized, not dropped).
         table_body = " ".join(f"{n * 100}円" for n in range(1, 400))
         laws = [
             law(id="r122RG00000011", title="給料表条例", appendix_tables=[f"別表第1\n{table_body}"]),
             law(id="r122RG00000012", title="決裁規程", articles=[{"label": "別表第1", "heading": "", "text": "契約金額が600万円以下の場合は部長が決裁する。", "paragraphs": []}]),
         ]
         built = build_search_index(laws).build(data_version="v1", generated_at_utc="t")
-        chunk_by_index = {}
-        for cf in built["chunks"].values():
-            for row in cf["chunks"]:
-                chunk_by_index[row["i"]] = row
-        from search_index import text_bigrams
+        chunk_by_index = {row["i"]: row for cf in built["chunks"].values() for row in cf["chunks"]}
         grams = set(text_bigrams("契約 600万円 決裁"))
         scores = {}
         seen_indexes = set()
         for f in built["postings"].values():
             for gram in grams:
-                for index, score in (f["terms"].get(gram) or []):
+                for index, score in f["terms"].get(gram) or []:
                     scores[index] = scores.get(index, 0) + score
                     seen_indexes.add(index)
         ranked = sorted(scores, key=lambda i: (-scores[i], i))
@@ -141,46 +183,90 @@ class PostingBuildTest(unittest.TestCase):
 
     def test_chunk_rows_carry_full_text_for_request_time_verification(self):
         body = "随意契約は600万円以下の額で締結できる。" * 20
-        built = build_search_index([law(id="r122RG00000032", title="委託規程", articles=[{"label": "第3条", "heading": "", "text": body, "paragraphs": []}])]).build(data_version="v1", generated_at_utc="t")
+        built = build_search_index(
+            [law(id="r122RG00000032", title="委託規程", articles=[{"label": "第3条", "heading": "", "text": body, "paragraphs": []}])]
+        ).build(data_version="v1", generated_at_utc="t")
         rows = [row for cf in built["chunks"].values() for row in cf["chunks"]]
         self.assertTrue(rows)
         self.assertIn("text", rows[0])
         self.assertEqual(rows[0]["text"], body.strip())
         self.assertLessEqual(len(rows[0]["snippet"]), search_index.SNIPPET_CHARS)
 
-    def test_manifest_records_scoring_parameters(self):
+    def test_manifest_and_write_emit_expected_files(self):
         built = build_search_index([law(body_text="本文検索の対象。")]).build(data_version="v1", generated_at_utc="t")
         manifest = built["manifest"]
-        self.assertEqual(manifest["chunk_shard_size"], search_index.CHUNK_SHARD_SIZE)
+        self.assertEqual(manifest["kind"], "bigram-tfidf")
+        self.assertEqual(manifest["chunk_shard_size"], 500)
         self.assertEqual(manifest["length_norm_alpha"], search_index.LENGTH_NORM_ALPHA)
         self.assertEqual(manifest["appendix_boost"], search_index.APPENDIX_BOOST)
         self.assertGreater(manifest["posting_terms"], 0)
         self.assertGreaterEqual(manifest["posting_entries"], manifest["posting_terms"])
-        self.assertEqual(search_index.CHUNK_SHARD_SIZE, 500)
-
-    def test_manifest_is_keyword_only(self):
-        built = build_search_index([law(body_text="本文検索の対象。")]).build(data_version="v1", generated_at_utc="t")
-        manifest = built["manifest"]
-        self.assertEqual(manifest["kind"], "bigram-tfidf")
         for cf in built["chunks"].values():
             for row in cf["chunks"]:
                 self.assertNotIn("v", row)
                 self.assertIn("source_url", row)
-
-    def test_write_emits_manifest_chunks_and_postings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "search"
-            manifest = build_search_index([law(body_text="本文検索の対象。")]).write(root, data_version="v9", generated_at_utc="t")
-            self.assertEqual(manifest["data_version"], "v9")
-            self.assertTrue((root / "manifest.json").exists())
+            written_manifest = build_search_index([law(body_text="本文検索の対象。")]).write(root, data_version="v9", generated_at_utc="t")
+            self.assertEqual(written_manifest["data_version"], "v9")
             written = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(written["chunk_count"], manifest["chunk_count"])
-            for name in manifest["files"]["chunks"] + manifest["files"]["postings"]:
+            self.assertEqual(written["chunk_count"], written_manifest["chunk_count"])
+            for name in written_manifest["files"]["chunks"] + written_manifest["files"]["postings"]:
                 self.assertTrue((root / name).exists(), name)
 
     def test_bigrams_normalize_fullwidth_digits(self):
-        grams = text_bigrams("６００万円")
-        self.assertIn("60", grams)
+        self.assertIn("60", text_bigrams("６００万円"))
+
+
+class ContentStatusTest(unittest.TestCase):
+    def test_chunks_default_to_complete_without_resources(self):
+        chunks = chunk_law(build_decision_law())
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk["content_status"] == "complete" for chunk in chunks))
+        self.assertTrue(all("resource" not in chunk for chunk in chunks))
+
+    def test_external_resource_only_is_decided_per_table_and_reflected_in_shards(self):
+        builder = SearchIndexBuilder()
+        builder.add_law(build_decision_law([None, RESOURCE]))
+        built = builder.build(data_version="test-version", generated_at_utc="2026-11-13T00:00:00Z")
+        rows = [row for shard in built["chunks"].values() for row in shard["chunks"]]
+        self.assertTrue(all("content_status" in row for row in rows))
+        flagged = [row for row in rows if row["content_status"] == "external_resource_only"]
+        self.assertEqual(len(flagged), 1)
+        self.assertEqual(flagged[0]["label"], "(様式第1号) 別に定める")
+        self.assertEqual(flagged[0]["resource"]["href"], RESOURCE["href"])
+        self.assertEqual(flagged[0]["resource"]["image_url"], RESOURCE["image_url"])
+        self.assertEqual(built["manifest"]["external_resource_chunks"], 1)
+        text_tables = [row for row in rows if row["kind"] == "appendix_table" and row["content_status"] == "complete"]
+        self.assertTrue(text_tables)
+        self.assertIn("課長 100万円以下", text_tables[0]["snippet"])
+
+    def test_resource_index_and_explicit_mapping_rules(self):
+        swapped = build_decision_law([RESOURCE, None])
+        swapped["appendix_tables"] = ["(様式第2号) 別に定める", "別表第1\n課長 100万円以下"]
+        flagged = [c for c in chunk_law(swapped) if c["content_status"] == "external_resource_only"]
+        self.assertEqual(len(flagged), 1)
+        self.assertEqual(flagged[0]["label"], "(様式第2号) 別に定める")
+
+        explicit = build_decision_law([FORM_RESOURCE, SECOND_FORM_RESOURCE, TABLE_RESOURCE])
+        explicit["appendix_tables"] = ["別表第1 決裁区分\n課長 100万円以下", "別表第2(第5条関係)", "別表第3(第9条関係)"]
+        explicit["appendix_table_resource_index"] = [None, None, 2]
+        explicit_flagged = [c for c in chunk_law(explicit) if c["content_status"] == "external_resource_only"]
+        self.assertEqual(len(explicit_flagged), 1)
+        self.assertEqual(explicit_flagged[0]["label"], "別表第3(第9条関係)")
+        self.assertEqual(explicit_flagged[0]["resource"]["href"], TABLE_RESOURCE["href"])
+
+        legacy = build_decision_law([FORM_RESOURCE])
+        legacy["appendix_tables"] = ["別表第1 決裁区分\n課長 100万円以下", "様式第1号"]
+        legacy_flagged = [c for c in chunk_law(legacy) if c["content_status"] == "external_resource_only"]
+        self.assertEqual(len(legacy_flagged), 1)
+        self.assertEqual(legacy_flagged[0]["resource"]["label"], FORM_RESOURCE["label"])
+
+        none_mapped = build_decision_law([SECOND_FORM_RESOURCE])
+        none_mapped["appendix_tables"] = ["別表第2(第5条関係)"]
+        none_mapped["appendix_table_resource_index"] = [None]
+        none_chunks = chunk_law(none_mapped)
+        self.assertTrue(all(c["content_status"] == "complete" and "resource" not in c for c in none_chunks))
 
 
 if __name__ == "__main__":
