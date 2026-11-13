@@ -1,5 +1,15 @@
 name: Deploy static ordinance API to GitHub Pages
 
+# Three automated paths reach the published API without a manual dispatch
+# (issue #66):
+#   1. push to main that touches the parser/index/builder scripts -> full build
+#      so a merged fix reaches Pages immediately.
+#   2. workflow_call from daily-reiki-check.yml when the city site changed.
+#   3. a weekly schedule as insurance for body-only replacements that keep the
+#      menu hash and 内容現在日 unchanged.
+# A push that only refreshes data/status/latest.json still runs the cheap
+# sample path, and the fail-closed guard below still refuses to downgrade a
+# larger published API with the 5-law sample.
 on:
   push:
     branches: [main]
@@ -12,6 +22,10 @@ on:
       - 'scripts/daily_check.py'
       - 'data/status/latest.json'
       - '.github/workflows/pages.yml'
+  schedule:
+    # Sunday 04:17 JST (Saturday 19:17 UTC): weekly insurance build, one hour
+    # after the daily check, so the two never queue behind each other.
+    - cron: '17 19 * * 6'
   workflow_dispatch:
     inputs:
       full_build:
@@ -27,6 +41,23 @@ on:
       delay_seconds:
         description: 'Delay between ordinance page fetches'
         required: true
+        default: '0.35'
+        type: string
+  workflow_call:
+    inputs:
+      full_build:
+        description: 'Build every ordinance body into site/api before deploying'
+        required: false
+        default: true
+        type: boolean
+      allow_sample_overwrite:
+        description: 'Explicitly allow a 5-law sample run to overwrite a larger published API. Ignored when full_build=true'
+        required: false
+        default: false
+        type: boolean
+      delay_seconds:
+        description: 'Delay between ordinance page fetches'
+        required: false
         default: '0.35'
         type: string
 
@@ -53,6 +84,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          # Two commits are enough to diff a push against its parent and detect
+          # builder/parser changes without cloning the whole history.
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -69,20 +104,45 @@ jobs:
           FULL_BUILD: ${{ inputs.full_build }}
           ALLOW_SAMPLE_OVERWRITE: ${{ inputs.allow_sample_overwrite }}
           CACHE_BUSTER: ${{ github.run_id }}-${{ github.run_attempt }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           # Issues #27/#29/#33: fail closed whenever the published state cannot
           # be established, including manual runs. Only an explicit
-          # full_build=true refresh, or an explicit allow_sample_overwrite=true
-          # after a successfully parsed health.json, may replace a larger
-          # published API with the 5-law sample.
+          # full_build=true refresh, a builder change, a scheduled run, or an
+          # explicit allow_sample_overwrite=true after a successfully parsed
+          # health.json may replace a larger published API with the 5-law sample.
           #
           # health.json is requested with a per-run cache buster and a no-cache
           # request header so a CDN copy from before a full deployment cannot be
           # mistaken for the current published state.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FULL_BUILD" = "true" ]; then
+          #
+          # Issue #66: a merged parser/index/builder change must reach Pages on
+          # its own. The change is detected here from the pushed diff instead of
+          # the workflow path filter, which cannot distinguish a script edit from
+          # a status-only update.
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+            echo "scheduled full build"
+            exit 0
+          fi
+          if { [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "workflow_call" ]; } && [ "$FULL_BUILD" = "true" ]; then
             echo "mode=full" >> "$GITHUB_OUTPUT"
             echo "skip_sample=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$EVENT_NAME" = "push" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            if git diff --name-only "$BEFORE_SHA" "$HEAD_SHA" -- \
+              scripts/parse_honbun.py \
+              scripts/search_index.py \
+              scripts/build_static_api.py \
+              scripts/reiki_common.py | grep -q .; then
+              echo "mode=full" >> "$GITHUB_OUTPUT"
+              echo "skip_sample=false" >> "$GITHUB_OUTPUT"
+              echo "builder or parser changed; using full build"
+              exit 0
+            fi
           fi
           health_json=$(mktemp)
           health_url="https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json?run=${CACHE_BUSTER}"
@@ -100,7 +160,7 @@ jobs:
           echo "published_count=$published_count" >> "$GITHUB_OUTPUT"
           echo "published_ok=$published_ok" >> "$GITHUB_OUTPUT"
           if [ "$published_count" -gt 5 ]; then
-            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$ALLOW_SAMPLE_OVERWRITE" = "true" ]; then
+            if { [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "workflow_call" ]; } && [ "$ALLOW_SAMPLE_OVERWRITE" = "true" ]; then
               echo "::warning::Published API already has $published_count laws. allow_sample_overwrite=true was set explicitly, so this manual sample run will overwrite it with 5 laws."
               echo "mode=sample" >> "$GITHUB_OUTPUT"
               echo "skip_sample=false" >> "$GITHUB_OUTPUT"
@@ -224,3 +284,10 @@ jobs:
         if: steps.guard.outputs.mode == 'full' || (steps.guard.outputs.mode == 'sample' && steps.index_changed.outputs.changed == 'true')
         id: deployment
         uses: actions/deploy-pages@v5
+
+      - name: Report why the deploy was skipped
+        if: steps.guard.outputs.mode == 'skip'
+        run: |
+          echo "### Sample deploy skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "The published API already holds ${PUBLISHED_COUNT:-many} laws, so this run did not deploy." >> "$GITHUB_STEP_SUMMARY"
+          echo "A merged parser or index change triggers a full build automatically; otherwise dispatch this workflow with full_build=true." >> "$GITHUB_STEP_SUMMARY"
