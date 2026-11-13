@@ -33,6 +33,12 @@ jobs:
     name: Check ordinance pages
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Issue #66: the reusable full-build job below decides from these outputs
+    # whether the city site really changed, so no crawl happens on a quiet day.
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      current_date: ${{ steps.check.outputs.current_date }}
+      law_count: ${{ steps.check.outputs.law_count }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -193,3 +199,21 @@ jobs:
             } else {
               await createFailureIssue();
             }
+
+  # Issue #66: GitHub does not start on: push workflows from a push made with
+  # GITHUB_TOKEN, so a status commit could never reach Pages on its own. The
+  # reusable workflow is called directly instead, and only when the menu page
+  # really changed. Quiet days stay at one request to the city site.
+  full-build:
+    name: Full build and deploy after a change
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    with:
+      full_build: true
+      allow_sample_overwrite: false
+      delay_seconds: '0.35'
