@@ -864,6 +864,18 @@ test("get_unit returns one appendix table or supplement", async () => {
   } finally { restore(); }
 });
 
+test("law-scoped search does not repeat a heading-only appendix label", async () => {
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第2", law_id: "r122RG00000002" }));
+    const row = payload.results.find((item) => item.kind === "appendix_table");
+    assert.ok(row, JSON.stringify(payload.results));
+    assert.ok(!row.snippet.startsWith("別表第2 別表第2"), row.snippet);
+    assert.equal(row.snippet.match(/別表第2/g).length, 1, row.snippet);
+  } finally { restore(); }
+});
+
 test("asof is rejected instead of silently returning the current version", async () => {
   const { impl } = pagesRouter({ "/api/laws/r122RG00000002.json": SAMPLE_LAW });
   const restore = mockFetch(impl);
@@ -937,6 +949,41 @@ test("exact phrase matching rejects chunks that only share the bigrams", async (
     assert.ok(payload.results.every((row) => row.match_type === "exact"));
     assert.equal(payload.filtered_out_exact, 1);
     assert.equal(payload.completeness, "complete");
+  } finally { restore(); }
+});
+
+test("heading-only appendix snippet does not repeat its own label", async () => {
+  const shard = { data_version: "fx", terms: {} };
+  for (const gram of ["別表", "表第", "第4"]) shard.terms[gram] = [[0, 1.4]];
+  const routes = {};
+  for (let s = 0; s < 16; s += 1) routes[`/api/search/postings-${String(s).padStart(2, "0")}.json`] = shard;
+  routes["/api/search/chunks-000.json"] = {
+    data_version: "fx",
+    chunks: [
+      {
+        i: 0,
+        law_id: "r122RG00000041",
+        title: "文書規程",
+        label: "別表第4(第21条関係)",
+        heading: "",
+        kind: "appendix_table",
+        content_status: "external_resource_only",
+        resource: { label: "別表第4(第21条関係)", href: "word/r122FG00002360.rtf", image_url: "" },
+        source_url: "https://e/41",
+        snippet: "別表第4(第21条関係)",
+        text: "別表第4(第21条関係)",
+      },
+    ],
+  };
+  const { impl } = pagesRouter(routes);
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "別表第4" }));
+    assert.equal(payload.count, 1);
+    const row = payload.results[0];
+    assert.equal(row.snippet, "別表第4(第21条関係)");
+    assert.equal(row.content_status, "external_resource_only");
+    assert.equal(row.resource.href, "word/r122FG00002360.rtf");
   } finally { restore(); }
 });
 

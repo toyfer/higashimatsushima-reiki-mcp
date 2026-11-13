@@ -263,6 +263,17 @@ function bestWindowStart(originals, size) {
   return Math.max(0, best - 40);
 }
 
+function unitHaystackText(label, heading, body) {
+  const labelText = String(label || "");
+  const headingText = String(heading || "");
+  const bodyText = String(body || "");
+  // A heading-only appendix table is published with its text equal to its own
+  // label, so prefixing the label again puts the same string twice in the
+  // snippet. Trim the repeated prefix instead of duplicating it (issue #49).
+  const rest = labelText && bodyText.startsWith(labelText) ? bodyText.slice(labelText.length).trim() : bodyText;
+  return `${labelText} ${headingText} ${rest}`.trim();
+}
+
 function buildSearchWindow(haystack, termMatches, size) {
   const original = haystack && haystack.original ? haystack.original : "";
   const matches = (termMatches || []).filter((match) => match && match.startOrig >= 0);
@@ -766,7 +777,7 @@ async function callTool(env, name, args) {
       }
       const units = lawUnits(law);
       const examined = units.map((unit) => {
-        const haystack = normalizeWithMap(`${unit.label} ${unit.heading} ${unit.text}`);
+        const haystack = normalizeWithMap(unitHaystackText(unit.label, unit.heading, unit.text));
         const matches = terms.map((term) => {
           const phrase = phraseMatchIn(haystack, term.normalized);
           if (phrase.found) return { term: term.raw, found: true, approximate: false, start: phrase.start, end: phrase.end };
@@ -1018,7 +1029,7 @@ async function callTool(env, name, args) {
 
     const evaluateChunk = (index, row) => {
       const body = String(row.text || row.snippet || "");
-      const raw = `${row.label || ""} ${row.heading || ""} ${body}`;
+      const raw = unitHaystackText(row.label, row.heading, body);
       const hasText = Boolean(row.text);
       const rejectedByExact = exact && hasText;
       // Cheap first pass: native string work only, so candidates that cannot
