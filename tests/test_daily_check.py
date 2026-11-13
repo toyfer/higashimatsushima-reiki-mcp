@@ -1,6 +1,9 @@
 import contextlib
+from email.message import Message
+import http.client
 import io
 import json
+import urllib.error
 import sys
 import tempfile
 import unittest
@@ -10,6 +13,85 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import daily_check
 from daily_check import extract_current_date, extract_honbun_links
+
+
+class RetryClassificationTest(unittest.TestCase):
+    def test_transient_failures_are_retryable(self) -> None:
+        self.assertTrue(daily_check.is_retryable(urllib.error.URLError("dns")))
+        self.assertTrue(daily_check.is_retryable(TimeoutError("slow")))
+        self.assertTrue(daily_check.is_retryable(ConnectionResetError("reset")))
+        # A truncated chunked body raises HTTPException, not URLError (issue #80).
+        self.assertTrue(daily_check.is_retryable(http.client.IncompleteRead(b"partial")))
+        self.assertTrue(daily_check.is_retryable(http.client.BadStatusLine("garbage")))
+
+    def test_server_errors_are_retryable_and_client_errors_are_not(self) -> None:
+        for status in (500, 502, 503, 504):
+            self.assertTrue(daily_check.is_retryable(urllib.error.HTTPError("u", status, "e", {}, None)))
+        for status in (400, 403, 404, 410):
+            self.assertFalse(daily_check.is_retryable(urllib.error.HTTPError("u", status, "e", {}, None)))
+
+    def test_unrelated_errors_are_not_retryable(self) -> None:
+        self.assertFalse(daily_check.is_retryable(ValueError("parsing")))
+
+
+class FetchTextRetryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_urlopen = daily_check.urllib.request.urlopen
+        self.original_sleep = daily_check.time.sleep
+        self.sleeps: list[float] = []
+        daily_check.time.sleep = lambda seconds: self.sleeps.append(seconds)  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        daily_check.urllib.request.urlopen = self.original_urlopen  # type: ignore[assignment]
+        daily_check.time.sleep = self.original_sleep  # type: ignore[assignment]
+
+    def test_server_error_is_retried_then_succeeds(self) -> None:
+        calls: list[str] = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError("u", 503, "unavailable", {}, None)
+            if len(calls) == 2:
+                raise http.client.IncompleteRead(b"half")
+            return contextlib.nullcontext(FakeResponse(b"<html>ok</html>"))
+
+        daily_check.urllib.request.urlopen = fake_urlopen  # type: ignore[assignment]
+        text, digest = daily_check.fetch_text("https://example.test/menu")
+        self.assertEqual(text, "<html>ok</html>")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(self.sleeps), 2)
+        self.assertTrue(all(seconds > 0 for seconds in self.sleeps))
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_client_error_is_not_retried(self) -> None:
+        calls: list[str] = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError("u", 404, "missing", {}, None)
+
+        daily_check.urllib.request.urlopen = fake_urlopen  # type: ignore[assignment]
+        with self.assertRaises(urllib.error.HTTPError):
+            daily_check.fetch_text("https://example.test/menu")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.sleeps, [])
+
+
+class FakeResponse:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+        self.headers = Message()
+        self.headers["Content-Type"] = "text/html; charset=utf-8"
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 class DailyCheckTest(unittest.TestCase):

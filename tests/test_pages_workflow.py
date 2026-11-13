@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PAGES = ROOT / ".github" / "workflows" / "pages.yml"
 TEST_WORKFLOW = ROOT / ".github" / "workflows" / "test.yml"
+DAILY_WORKFLOW = ROOT / ".github" / "workflows" / "daily-reiki-check.yml"
 
 
 def read(path: Path) -> str:
@@ -67,6 +68,46 @@ class PagesGuardFailClosedTest(unittest.TestCase):
     def test_guard_still_fails_closed_on_an_unreadable_health_file(self) -> None:
         guard = self.pages.split("Guard against sample downgrade of a full deployment", 1)[1].split("- name: Check whether", 1)[0]
         self.assertEqual(guard.count("exit 1"), 2)
+
+
+class DailyCheckCallerPermissionsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.daily = read(DAILY_WORKFLOW)
+
+    def test_full_build_job_can_download_the_status_artifact(self) -> None:
+        job = self.daily.split("  full-build:", 1)[1]
+        permissions = job.split("uses:", 1)[0]
+        # pages.yml restores the status artifact through download-artifact, and a
+        # called workflow cannot exceed the caller's token (issue #80).
+        self.assertIn("actions: read", permissions)
+        self.assertIn("pages: write", permissions)
+        self.assertIn("id-token: write", permissions)
+
+    def test_check_job_does_not_gain_deploy_permissions(self) -> None:
+        job = self.daily.split("\n  check:", 1)[1].split("\n  full-build:", 1)[0]
+        # The caller only commits the status file and opens issues; deploying
+        # stays with the reusable job below.
+        self.assertNotIn("pages: write", job)
+        self.assertNotIn("id-token: write", job)
+
+
+class PagesStepOrderTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pages = read(PAGES)
+
+    def test_status_is_restored_before_the_index_is_compared(self) -> None:
+        restore = self.pages.index("Restore status from the calling workflow")
+        compare = self.pages.index("Check whether the ordinance index changed")
+        # Comparing the pre-restore copy decided the sample path from stale data
+        # (issue #80).
+        self.assertLess(restore, compare)
+        self.assertEqual(self.pages.count("Restore status from the calling workflow"), 1)
+
+    def test_daily_check_changes_trigger_a_full_build(self) -> None:
+        guard = self.pages.split("Guard against sample downgrade of a full deployment", 1)[1].split("- name: Check whether", 1)[0]
+        self.assertIn("scripts/daily_check.py", guard)
 
 
 class PullRequestTestWorkflowTest(unittest.TestCase):

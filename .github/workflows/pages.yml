@@ -144,6 +144,7 @@ jobs:
               scripts/parse_honbun.py \
               scripts/search_index.py \
               scripts/build_static_api.py \
+              scripts/daily_check.py \
               scripts/reiki_common.py | grep -q .; then
               echo "mode=full" >> "$GITHUB_OUTPUT"
               echo "skip_sample=false" >> "$GITHUB_OUTPUT"
@@ -201,6 +202,13 @@ jobs:
           echo "mode=sample" >> "$GITHUB_OUTPUT"
           echo "skip_sample=false" >> "$GITHUB_OUTPUT"
 
+      - name: Restore status from the calling workflow
+        if: inputs.status_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.status_artifact }}
+          path: data/status
+
       - name: Check whether the ordinance index changed
         id: index_changed
         if: steps.guard.outputs.mode != 'full'
@@ -208,13 +216,6 @@ jobs:
           changed=$(python3 -c "import json; print(str(json.load(open('data/status/latest.json')).get('changed', False)).lower())")
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Index changed: $changed"
-
-      - name: Restore status from the calling workflow
-        if: inputs.status_artifact != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ inputs.status_artifact }}
-          path: data/status
 
       - name: Collect ordinance index
         # Skipped when the caller already crawled the index pages and handed
