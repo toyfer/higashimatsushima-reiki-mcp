@@ -53,6 +53,38 @@ def _paragraph_text(paragraph: dict[str, Any]) -> str:
     return _collapse(" ".join(parts))
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．！？])")
+
+
+def split_long_text(text: str, limit: int = LONG_ARTICLE_CHARS) -> list[str]:
+    """Split collapsed prose into sentence-packed segments of at most `limit` chars.
+
+    A long preamble used to become one oversized chunk, which lost weight against
+    the length normalisation and pushed the ordinance out of the top postings
+    (issue #92).
+    """
+    collapsed = _collapse(text)
+    if len(collapsed) <= limit:
+        return [collapsed] if collapsed else []
+    segments: list[str] = []
+    current = ""
+    for sentence in (part for part in _SENTENCE_SPLIT_RE.split(collapsed) if part):
+        while len(sentence) > limit:
+            if current:
+                segments.append(current)
+                current = ""
+            segments.append(sentence[:limit])
+            sentence = sentence[limit:]
+        if current and len(current) + len(sentence) > limit:
+            segments.append(current)
+            current = sentence
+        else:
+            current += sentence
+    if current:
+        segments.append(current)
+    return segments
+
+
 def _article_text(article: dict[str, Any]) -> str:
     text = _collapse(str(article.get("text") or ""))
     if text:
@@ -158,8 +190,9 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
         chunks.append(chunk)
 
     preamble = _preamble_text(law)
-    if preamble:
-        add("前文", "", preamble, "preamble")
+    for index, segment in enumerate(split_long_text(preamble)):
+        label = "前文" if index == 0 else f"前文（{index + 1}）"
+        add(label, "", segment, "preamble")
     for article in law.get("articles") or []:
         if not isinstance(article, dict):
             continue

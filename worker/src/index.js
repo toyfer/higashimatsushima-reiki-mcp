@@ -1,4 +1,5 @@
 const DEFAULT_PAGES_BASE = "https://toyfer.github.io/higashimatsushima-reiki-mcp";
+const PREAMBLE_PREVIEW_CHARS = 120;
 const LAW_ID_RE = /^r\d+RG\d+$/i;
 const CANONICAL_ID_RE = /^r(\d+)rg(\d+)$/i;
 const CACHE_TTL_SECONDS = 300;
@@ -158,6 +159,23 @@ function scoreLaw(law, query) {
   }
   if (titleHits === terms.length) return title.includes(joined) ? 90 : 85;
   return 50 + Math.round((10 * titleHits) / terms.length);
+}
+
+// Ordinances without 第N条 keep their whole text in body_text / preamble, so a
+// table of contents can look empty even though the body exists (issue #92).
+function preambleSummary(law) {
+  const skip = new Set([law.enacted_date, law.ordinance_number, law.title].map((value) => normalize(value)).filter(Boolean));
+  const parts = Array.isArray(law.preamble) ? law.preamble : typeof law.preamble === "string" ? [law.preamble] : [];
+  const kept = parts.map((part) => String(part || "")).filter((part) => part.trim() && !skip.has(normalize(part)));
+  const bodyText = String(law.body_text || "").replace(/\s+/g, " ").trim();
+  const text = bodyText || kept.join(" ").replace(/\s+/g, " ").trim();
+  const chars = text.length;
+  return {
+    has_body_text: chars > 0,
+    body_text_chars: chars,
+    preamble_count: kept.length,
+    body_text_preview: chars > 0 ? text.slice(0, PREAMBLE_PREVIEW_CHARS) : "",
+  };
 }
 
 function fnv1a32(value) {
@@ -692,6 +710,7 @@ async function callTool(env, name, args) {
           data_version: law.data_version || "",
           content_current_date: law.content_current_date || "",
           article_count: articles.length,
+          ...preambleSummary(law),
           supplement_count: supplements.length,
           appendix_table_count: tables.length,
           offset,
@@ -1425,7 +1444,7 @@ const TOOLS = [
   {
     name: "get_toc",
     description:
-      "Return the table of contents of one ordinance: article labels and headings with offset/limit pagination, plus supplement and appendix table counts and labels. Use it before get_article or get_unit.",
+      "Return the table of contents of one ordinance: article labels and headings with offset/limit pagination, plus supplement and appendix table counts and labels. Also reports has_body_text, body_text_chars, preamble_count and body_text_preview, so an ordinance whose whole text lives in body_text/preamble (article_count 0) is distinguishable from an empty one: read those with get_law. Use it before get_article or get_unit.",
     inputSchema: {
       type: "object",
       properties: {
