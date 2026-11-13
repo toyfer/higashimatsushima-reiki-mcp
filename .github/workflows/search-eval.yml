@@ -1,0 +1,52 @@
+name: Search evaluation
+
+# Golden set for search algorithm changes (issue #55). The evaluation runs the
+# Worker in-process against the published index, so it is triggered by a
+# successful publish rather than by a pull request: a red run then means the
+# live code and the live corpus disagree, not that the index lagged behind.
+
+on:
+  workflow_run:
+    workflows: ["Deploy static ordinance API to GitHub Pages"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-eval
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    name: Golden set
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the published revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Evaluate the published index
+        env:
+          SEARCH_EVAL_SUMMARY: ${{ runner.temp }}/search-eval.md
+        run: node tools/search_eval.mjs
+      - name: Write the step summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/search-eval.md" ]; then
+            cat "${RUNNER_TEMP}/search-eval.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-eval
+          path: ${{ runner.temp }}/search-eval.md
+          if-no-files-found: ignore
