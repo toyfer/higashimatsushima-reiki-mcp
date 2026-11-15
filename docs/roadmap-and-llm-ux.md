@@ -13,7 +13,7 @@
 初期構想では Cloudflare D1 への移行も検討されていましたが、これまでの開発・計測を通じて、以下の理由から **D1 を使わないステートレス構成を正式な本番アーキテクチャとして固定** しています。
 
 1. **コーパス規模が静的シャード配信と完全に噛み合っている**
-   - 東松島市の全例規は `1,192` 件・全チャンク `19,684` 個・検索インデックス総量 `31.5 MiB`（`chunks-000..039.json` 40本＋`postings-00..15.json` 16本＋`manifest.json`）に収まっています。
+   - 東松島市の全例規は `1,192` 件・全チャンク `19,619` 個・検索インデックス総量 `31.5 MiB`（`chunks-000..039.json` 40本＋`postings-00..15.json` 16本＋`manifest.json`）に収まっています。
    - Worker は `postings` と `chunks` を Cloudflare エッジキャッシュ経由でオンデマンド取得するだけでサブ秒応答が可能であり、別途データベースを保守する理由がありません。
 2. **デプロイとデータ版数の一貫性が壊れにくい**
    - DB 同期バッチを挟むと「インデックスと本文テーブルの世代ズレ」が起きやすくなりますが、Pages ビルド時に全 JSON と検索シャードを同一 `data_version` で同時生成・原子的に配信することで整合性を保証できます。
@@ -41,18 +41,18 @@
 ### 原則 2: 大規模条例でのトークン爆発を防ぐ
 - 例：`r122RG00000066`（東松島市市税条例）は単体 JSON が **833,762 bytes（364,078 文字）** に達します。
 - `get_law` のツール説明にも「`article_count: 0` の要綱・ガイドラインやごく短い例規向けであり、条数が多い条例は `get_toc` → `get_article` / `get_unit` を使うこと」を明記し、不用意な全文取得を防ぐ。
-- `get_toc` で様式（`appendix_styles`）の件数も把握でき、`get_unit` 経由で個別に取得できるよう拡張する（`#115`）。
+- `get_toc` で様式（`appendix_styles`）の件数と見出しを把握でき、`get_unit` の `kind: "appendix_style"` 経由で個別に取得できる（`#115` で実装）。
 
 ### 原則 3: すべての取得系ツールから一次情報 URL を直接返却する
-- LLM が回答に根拠リンクを付与する際、別ツールを呼び直さずに済むよう、`get_article` と `get_toc` の応答にも `source_url` を含める（`#115`）。
-- 外部資料リンク（`resource.href` / `image_url`）は相対パスのままにせず、解決済み絶対 URL も併せて返せるようにする（`#115`）。
+- LLM が回答に根拠リンクを付与する際、別ツールを呼び直さずに済むよう、`get_article` と `get_toc` の応答にも `source_url` を含める（`#115` で実装）。
+- 外部資料リンク（`resource.href` / `image_url`）は相対パスを保持したまま、解決済み `href_url` / `image_full_url` も併せて返す（`#115` で実装）。
 
 ### 原則 4: LLM やユーザーの自然な表記ゆれを吸収する
 - `get_law` 系で `law_id` の大小文字揺れを正規化しているのと同様に、`get_article` の `article_label` でも NFKC 正規化（`"第１条"` → `"第1条"`）や番号のみ（`"1"` / `"36の3の2"`）の指定を許容する（`#115`）。
-- 未一致時の `available_labels` は、200 条超の例規で長大な単一文字列にならないよう簡潔な表現に整える（`#115`）。
+- 未一致時の `available_labels` は、21 件以上で先頭・末尾・総件数の要約と `get_toc` への誘導に整え、長大な単一文字列を返さない（`#115` で実装）。
 
 ### 原則 5: 「見つからない」と「上限で打ち切られた」を正直に区別する
-- `search_laws_by_content` でインデックス側の上限（1 語最大 50 posting・1 例規最大 3 posting）に到達した語が含まれる場合、Worker の fetch 上限に達していなくても `completeness` が誤って「全件網羅」に見えないよう、上限到達フラグを明示する（`#115`）。
+- `search_laws_by_content` でインデックス側の上限（1 語最大 50 posting・1 例規最大 3 posting）に到達した語が含まれる場合、Worker の fetch 上限に達していなくても `completeness` が誤って「全件網羅」に見えないよう、`index_cap_reached`、`capped_terms`、`completeness_note` でインデックス上限を別軸で明示する（`#115` で実装）。
 
 ### 原則 6: 構造化データは原本の階層を忠実に保つ
 - HTML 解析段階で表セル内の参照文字列（「別表第1に定める…」「第4条、…」「附則第12条第1項」）が誤って別表・新条文・附則区切りへ化けないようにし、条文欠落やラベル重複を根絶する（`#110`）。
@@ -65,8 +65,8 @@
 
 | 優先順 | Issue | 内容 | 主な対象ファイル |
 |---|---|---|---|
-| **Step 1（最優先）** | **`#110` [P1]** | HTML 構造クラス・テーブル内判定の導入による誤分割修正（`r122RG00001796` の本則 12 条欠落、読替え表セルの偽条文化 14 例規、附則 53+ 細切れの解消） | `scripts/parse_honbun.py`, `tests/test_parse_honbun.py` |
-| **Step 2（検索整合性）** | **`#111` [P2]** | `scope="law"` × `operator="OR"` 更新漏れ、`scope="chunk"` × `group_by="law"` 分離、複数語内の 1 文字語チェック、`law_id` 指定時 `exact` 優先ソート | `worker/src/index.js`, `worker/test/` |
-| **Step 2（インデックス契約）** | **`#112` [P3]** | チャンク行への `unit_index` 付与によるグローバル/個別 `unit_id` 形式統一、40 文字超別表 1 行目の全文インデックス保持 | `scripts/search_index.py`, `worker/src/index.js` |
-| **Step 3（LLM UX 向上）** | **`#115` [P2]** | MCP `annotations`・統一ワークフロー説明、`get_article` / `get_toc` への `source_url` 追加、`article_label` 正規化、様式取得、50 posting 上限可視化、`resource` 絶対 URL 化 | `worker/src/index.js`, `worker/README.md`, `worker/test/` |
+| **Step 1（完了）** | **`#110` [P1]** | HTML 構造クラス・テーブル内判定の導入による誤分割修正（`r122RG00001796` の本則 12 条欠落、読替え表セルの偽条文化 14 例規、附則 53+ 細切れの解消） | `scripts/parse_honbun.py`, `tests/test_parse_honbun.py` |
+| **Step 2（完了）** | **`#111` [P2]** | `scope="law"` × `operator="OR"` 更新漏れ、`scope="chunk"` × `group_by="law"` 分離、複数語内の 1 文字語チェック、`law_id` 指定時 `exact` 優先ソート | `worker/src/index.js`, `worker/test/` |
+| **Step 2（完了）** | **`#112` [P3]** | チャンク行への `unit_index` 付与によるグローバル/個別 `unit_id` 形式統一、40 文字超別表 1 行目の全文インデックス保持 | `scripts/search_index.py`, `worker/src/index.js` |
+| **Step 3（実装済み・PR 待ち）** | **`#115` [P2]** | MCP `annotations`・統一ワークフロー説明、`get_article` / `get_toc` への `source_url` 追加、`article_label` 正規化、様式取得、50 posting 上限の別軸可視化、重複本文の任意省略、`resource` 絶対 URL 併記 | `worker/src/index.js`, `worker/README.md`, `worker/test/` |
 | **運用（整備済み・継続）** | **`#113`, `#114`, `#96`** | ドキュメント刷新・CI ワークフロー統一・スクリプト衛生整備（`#113`, `#114`）および Worker 自動デプロイ履歴ログ（`#96`） | `README.md`, `.github/workflows/`, `scripts/` |

@@ -578,3 +578,66 @@ test("law_id scoped search ranks exact above approximate and upgrades law-scope 
     restore();
   }
 });
+
+
+test("index posting cap is visible separately from call completeness (#115)", async () => {
+  const chunks = [
+    { i: 0, law_id: "r122RG00000911", title: "上限検証条例", label: "第1条", kind: "article", text: "随意契約の手続を定める。" },
+    { i: 1, law_id: "r122RG00000912", title: "上限検証規則", label: "第1条", kind: "article", text: "随意契約の基準を定める。" },
+    { i: 2, law_id: "r122RG00000913", title: "参考条例", label: "第1条", kind: "article", text: "公募の手続を定める。" },
+  ];
+  const cappedRoutes = buildSearchRoutes(chunks, {}, { maxPostingsPerTerm: 2 });
+  const restoreCapped = mockFetch(pagesRouter(cappedRoutes).impl);
+  try {
+    const capped = toolText(await callTool("search_laws_by_content", { query: "随意契約", limit: 10 }));
+    assert.equal(capped.completeness, "complete");
+    assert.equal(capped.index_cap_reached, true);
+    assert.deepEqual(capped.capped_terms, ["随意契約"]);
+    assert.match(capped.completeness_note, /max_postings_per_term=2/);
+    assert.match(capped.completeness_note, /do not treat absence as corpus-wide proof/);
+  } finally {
+    restoreCapped();
+  }
+
+  const openRoutes = buildSearchRoutes(chunks, {}, { maxPostingsPerTerm: 50 });
+  const restoreOpen = mockFetch(pagesRouter(openRoutes).impl);
+  try {
+    const open = toolText(await callTool("search_laws_by_content", { query: "随意契約", limit: 10 }));
+    assert.equal(open.completeness, "complete");
+    assert.equal(open.index_cap_reached, false);
+    assert.deepEqual(open.capped_terms, []);
+    assert.match(open.completeness_note, /no queried term reached/);
+  } finally {
+    restoreOpen();
+  }
+
+});
+
+test("law_id search reports that the global posting cap does not apply (#115)", async () => {
+  const law = {
+    id: "r122RG00000914",
+    title: "単一例規検証条例",
+    data_version: "fx",
+    content_current_date: "令和8年6月26日",
+    source_url: "https://example.invalid/914.html",
+    articles: [{ label: "第1条", heading: "", text: "随意契約の手続を定める。", paragraphs: [] }],
+    appendix_tables: [],
+    supplements: [],
+    appendix_styles: ["様式第1号(第1条関係)"],
+    resources: [{ label: "様式第1号(第1条関係)", kind: "form", href: "word/form914.rtf", image_url: "" }],
+  };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000914.json": law });
+  const restore = mockFetch(impl);
+  try {
+    const payload = toolText(await callTool("search_laws_by_content", { query: "様式第1号", law_id: law.id }));
+    assert.equal(payload.index_cap_reached, false);
+    assert.deepEqual(payload.capped_terms, []);
+    assert.match(payload.completeness_note, /global bigram posting cap does not apply/);
+    const styleHit = payload.results.find((row) => row.kind === "appendix_style");
+    assert.ok(styleHit, JSON.stringify(payload.results));
+    assert.equal(styleHit.unit_id, "r122RG00000914#appendix_style-1");
+    assert.equal(styleHit.resource.href_url, "https://example.invalid/word/form914.rtf");
+  } finally {
+    restore();
+  }
+});
