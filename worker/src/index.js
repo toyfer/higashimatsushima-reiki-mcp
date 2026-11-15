@@ -815,6 +815,12 @@ async function callTool(env, name, args) {
     }
     const terms = parseSearchTerms(query);
     if (!terms.length) throw invalidParams("query must contain searchable characters");
+    const shortTerm = terms.find((term) => term.normalized.length < MIN_QUERY_CHARS);
+    if (shortTerm) {
+      throw invalidParams(
+        `query term "${shortTerm.raw}" must contain at least ${MIN_QUERY_CHARS} searchable characters after normalization, because the body index stores bigrams only. Use a longer phrase such as 税金 instead of 税.`
+      );
+    }
     const limit = Math.min(Math.max(Number(input.limit) || 10, 1), 50);
     const operator = String(input.operator || "AND").toUpperCase() === "OR" ? "OR" : "AND";
     const rawScope = String(input.scope || "chunk").toLowerCase();
@@ -886,7 +892,9 @@ async function callTool(env, name, args) {
         const evidence = new Map();
         for (const entry of examined) {
           for (const match of entry.matched) {
-            if (evidence.has(match.term)) continue;
+            const matchType = match.approximate ? "approximate" : "exact";
+            const existing = evidence.get(match.term);
+            if (existing && (existing.match_type === "exact" || matchType === "approximate")) continue;
             const window = buildSearchWindow(entry.haystack, [windowMatch(entry, match)], snippetWindow);
             evidence.set(match.term, {
               term: match.term,
@@ -896,17 +904,14 @@ async function callTool(env, name, args) {
               unit_id: unitId(law.id, entry.unit),
               snippet: window.snippet,
               highlights: window.highlights,
-              match_type: match.approximate ? "approximate" : "exact",
+              match_type: matchType,
               content_status: entry.unit.content_status || "complete",
-              // Evidence entries must carry their own resource: the top level
-              // copies the first entry and used to fall back to null here
-              // (issue #76).
               resource: entry.unit.resource || null,
             });
           }
         }
         const evidenceList = [...evidence.values()];
-        const first = evidenceList[0] || null;
+        const first = evidenceList.find((item) => item.match_type === "exact") || evidenceList[0] || null;
         const satisfied = operator === "AND" ? terms.every((term) => evidence.has(term.raw)) : evidence.size > 0;
         if (satisfied && first) {
           results = [
@@ -942,8 +947,17 @@ async function callTool(env, name, args) {
           else filteredOutNoTerm += 1;
         }
         const scored = qualifies
-          .map((entry) => ({ entry, score: scoreUnit(entry.unit.text, terms.flatMap((term) => term.bigrams)) }))
-          .sort((a, b) => b.score - a.score || a.entry.unit.label.localeCompare(b.entry.unit.label));
+          .map((entry) => ({
+            entry,
+            matchType: entry.matched.every((match) => !match.approximate) ? "exact" : "approximate",
+            score: scoreUnit(entry.unit.text, terms.flatMap((term) => term.bigrams)),
+          }))
+          .sort(
+            (a, b) =>
+              (a.matchType === "exact" ? 0 : 1) - (b.matchType === "exact" ? 0 : 1) ||
+              b.score - a.score ||
+              a.entry.unit.label.localeCompare(b.entry.unit.label)
+          );
         truncated = scored.length > limit;
         results = scored.slice(0, limit).map(({ entry, score }) => {
           const window = buildSearchWindow(entry.haystack, entry.matched.map((match) => windowMatch(entry, match)), snippetWindow);
@@ -1093,6 +1107,8 @@ async function callTool(env, name, args) {
     const chunkCache = new Map();
     const results = [];
     const lawGroups = new Map();
+    const satisfiedLawGroups = new Map();
+    const chunkBestByLaw = new Map();
     const perLaw = new Map();
     const done = new Set();
     let walked = 0;
@@ -1182,15 +1198,21 @@ async function callTool(env, name, args) {
       }));
       const resultMatchType = matched.every((entry) => !entry.approximate) ? "exact" : "approximate";
 
-      if (scope === "law" || groupBy === "law") {
+      if (scope === "law") {
         const lawId = row.law_id;
         if (!lawGroups.has(lawId)) {
-          lawGroups.set(lawId, { law_id: lawId, title: row.title, score, matches: new Map() });
+          lawGroups.set(lawId, { law_id: lawId, title: row.title, source_url: row.source_url || "", score, matches: new Map() });
         }
         const group = lawGroups.get(lawId);
         group.score = Math.max(group.score, score);
         for (const entry of matched) {
-          if (group.matches.has(entry.raw)) continue;
+          const nextMatchType = entry.approximate ? "approximate" : "exact";
+          const existing = group.matches.get(entry.raw);
+          const better =
+            !existing ||
+            (existing.match_type === "approximate" && nextMatchType === "exact") ||
+            (existing.match_type === nextMatchType && score > existing._score);
+          if (!better) continue;
           const window = buildSearchWindow(
             haystack,
             termMatches.filter((match) => match.term === entry.raw),
@@ -1204,39 +1226,43 @@ async function callTool(env, name, args) {
             unit_id: unitId(lawId, { label: row.label, kind: row.kind, unitIndex: row.unit_index }),
             snippet: window.snippet,
             highlights: window.highlights,
-            match_type: entry.approximate ? "approximate" : "exact",
+            match_type: nextMatchType,
             content_status: row.content_status || "complete",
             resource: row.resource || null,
+            _score: score,
           });
         }
         const satisfied =
           operator === "AND" ? terms.every((term) => group.matches.has(term.raw)) : group.matches.size > 0;
-        if (satisfied && !results.some((item) => item.law_id === lawId)) {
-          const groupMatches = [...group.matches.values()];
-          // Describe the law-level row with the evidence of the first matched
-          // term. Mixing the last scanned chunk's label with the first term's
-          // snippet made content_status and resource disagree with each other
-          // (issue #76).
-          const primary = groupMatches[0];
-          results.push({
-            law_id: lawId,
-            title: row.title,
-            label: primary.label,
-            heading: primary.heading || "",
-            kind: primary.kind || "",
-            unit_id: primary.unit_id,
-            source_url: row.source_url || "",
-            score: group.score,
-            snippet: primary.snippet,
-            highlights: primary.highlights,
-            match_type: groupMatches.every((item) => item.match_type === "exact") ? "exact" : "approximate",
-            content_status: primary.content_status || "complete",
-            resource: primary.resource || null,
-            matched_terms: [...group.matches.keys()],
-            unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
-            matches: groupMatches,
-          });
-        }
+        if (satisfied) satisfiedLawGroups.set(lawId, group);
+        return;
+      }
+
+      if (groupBy === "law") {
+        const prev = chunkBestByLaw.get(row.law_id);
+        const better =
+          !prev ||
+          (prev.match_type === "approximate" && resultMatchType === "exact") ||
+          (prev.match_type === resultMatchType && score > prev.score);
+        if (!better) return;
+        const window = buildSearchWindow(haystack, termMatches, snippetWindow);
+        chunkBestByLaw.set(row.law_id, {
+          law_id: row.law_id,
+          title: row.title,
+          label: row.label,
+          heading: row.heading || "",
+          kind: row.kind || "",
+          unit_id: unitId(row.law_id, { label: row.label, kind: row.kind, unitIndex: row.unit_index }),
+          source_url: row.source_url || "",
+          score,
+          snippet: window.snippet,
+          highlights: window.highlights,
+          match_type: resultMatchType,
+          content_status: row.content_status || "complete",
+          resource: row.resource || null,
+          matched_terms: matched.map((entry) => entry.raw),
+          unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
+        });
         return;
       }
 
@@ -1272,6 +1298,24 @@ async function callTool(env, name, args) {
     // all does not spend the whole fetch budget (issues #79, #78).
     const approximateFillerCap = collectTarget * 4;
     const collectedEnough = () => {
+      if (scope === "law") {
+        if (satisfiedLawGroups.size < collectTarget) return false;
+        if (exact) return true;
+        let exactCount = 0;
+        for (const group of satisfiedLawGroups.values()) {
+          if ([...group.matches.values()].every((item) => item.match_type === "exact")) exactCount += 1;
+        }
+        return exactCount >= collectTarget || satisfiedLawGroups.size >= approximateFillerCap;
+      }
+      if (groupBy === "law") {
+        if (chunkBestByLaw.size < collectTarget) return false;
+        if (exact) return true;
+        let exactCount = 0;
+        for (const entry of chunkBestByLaw.values()) {
+          if (entry.match_type === "exact") exactCount += 1;
+        }
+        return exactCount >= collectTarget || chunkBestByLaw.size >= approximateFillerCap;
+      }
       if (results.length < collectTarget) return false;
       if (exact) return true;
       const exactCount = results.filter((row) => row.match_type === "exact").length;
@@ -1306,6 +1350,40 @@ async function callTool(env, name, args) {
       // Each shard is visited once, so holding it after the walk only keeps up
       // to 500 full chunk texts alive for nothing (issue #67).
       chunkCache.delete(shard);
+    }
+    if (scope === "law") {
+      for (const group of satisfiedLawGroups.values()) {
+        const rawMatches = [...group.matches.values()];
+        const primary =
+          [...rawMatches].sort(
+            (a, b) =>
+              (a.match_type === "exact" ? 0 : 1) - (b.match_type === "exact" ? 0 : 1) ||
+              b._score - a._score
+          )[0] || rawMatches[0];
+        const groupMatches = rawMatches.map(({ _score, ...clean }) => clean);
+        results.push({
+          law_id: group.law_id,
+          title: group.title,
+          label: primary.label,
+          heading: primary.heading || "",
+          kind: primary.kind || "",
+          unit_id: primary.unit_id,
+          source_url: group.source_url,
+          score: group.score,
+          snippet: primary.snippet,
+          highlights: primary.highlights,
+          match_type: groupMatches.every((item) => item.match_type === "exact") ? "exact" : "approximate",
+          content_status: primary.content_status || "complete",
+          resource: primary.resource || null,
+          matched_terms: [...group.matches.keys()],
+          unmatched_terms: terms.map((term) => term.raw).filter((raw) => !group.matches.has(raw)),
+          matches: groupMatches,
+        });
+      }
+    } else if (groupBy === "law") {
+      for (const entry of chunkBestByLaw.values()) {
+        results.push(entry);
+      }
     }
     if (skippedPerLaw > 0 && results.length < limit) reasons.add("max_results_per_law");
     // Exact evidence outranks approximate evidence regardless of score: an

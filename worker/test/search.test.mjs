@@ -416,3 +416,165 @@ test("completeness becomes partial when candidate_scan_limit or pages_fetch_budg
     restoreBudget();
   }
 });
+
+test("scope=law OR aggregates later-chunk terms, higher scores, and exact upgrades (#111)", async () => {
+  const laterChunks = [
+    {
+      i: 0,
+      law_id: "r122RG00000901",
+      title: "契約規則",
+      label: "第1条",
+      kind: "article",
+      weight: 1,
+      text: "随意契約の締結手続を定める。60万点と1万円で計算する。",
+    },
+    {
+      i: 1,
+      law_id: "r122RG00000901",
+      title: "契約規則",
+      label: "別表第1",
+      kind: "appendix_table",
+      unit_index: 1,
+      weight: 5,
+      text: "要領に基づく限度額は600万円とする。",
+    },
+  ];
+  const { impl } = pagesRouter(buildSearchRoutes(laterChunks, {}, { chunkShardSize: 1 }));
+  const restore = mockFetch(impl);
+  try {
+    const orRes = toolText(
+      await callTool("search_laws_by_content", {
+        query: "随意契約 要領 600万円",
+        operator: "OR",
+        scope: "law",
+        exact: false,
+        limit: 10,
+      })
+    );
+    assert.equal(orRes.count, 1);
+    const hit = orRes.results[0];
+    assert.deepEqual(hit.matched_terms.slice().sort(), ["600万円", "随意契約", "要領"].sort());
+    assert.deepEqual(hit.unmatched_terms, []);
+    assert.equal(hit.match_type, "exact");
+    assert.equal(hit.matches.length, 3);
+    const amountProof = hit.matches.find((m) => m.term === "600万円");
+    assert.equal(amountProof.match_type, "exact");
+    assert.equal(amountProof.unit_id, "r122RG00000901#appendix_table-1");
+  } finally {
+    restore();
+  }
+});
+
+test("scope=chunk with group_by=law picks best single matching chunk per law without mixing terms (#111)", async () => {
+  const splitChunks = [
+    {
+      i: 0,
+      law_id: "r122RG00000902",
+      title: "契約要綱",
+      label: "第1条",
+      kind: "article",
+      weight: 1,
+      text: "随意契約の基準を示す。",
+    },
+    {
+      i: 1,
+      law_id: "r122RG00000902",
+      title: "契約要綱",
+      label: "第2条",
+      kind: "article",
+      weight: 5,
+      text: "要領により実施する。",
+    },
+  ];
+  const { impl } = pagesRouter(buildSearchRoutes(splitChunks, {}, { chunkShardSize: 1 }));
+  const restore = mockFetch(impl);
+  try {
+    const res = toolText(
+      await callTool("search_laws_by_content", {
+        query: "随意契約 要領",
+        operator: "OR",
+        scope: "chunk",
+        group_by: "law",
+        limit: 10,
+      })
+    );
+    assert.equal(res.count, 1);
+    assert.equal(res.truncated, false);
+    assert.deepEqual(res.truncation_reasons, []);
+    assert.equal(res.results[0].label, "第2条");
+    assert.deepEqual(res.results[0].matched_terms, ["要領"]);
+    assert.deepEqual(res.results[0].unmatched_terms, ["随意契約"]);
+  } finally {
+    restore();
+  }
+});
+
+test("multi-term queries containing a single-character term are rejected with -32602 and zero fetches (#111)", async () => {
+  const { impl, requested } = pagesRouter(CORPUS_ROUTES);
+  const restore = mockFetch(impl);
+  try {
+    for (const badQuery of ["税 条例", "「税」 条例", "随意契約 税"]) {
+      const body = await callTool("search_laws_by_content", { query: badQuery, operator: "AND" });
+      assert.equal(body.error.code, -32602, badQuery);
+      assert.match(body.error.message, /at least 2/, badQuery);
+    }
+    assert.equal(requested.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("law_id scoped search ranks exact above approximate and upgrades law-scope approximate hits (#111)", async () => {
+  const rankLaw = {
+    id: "r122RG00000903",
+    title: "検証規則",
+    data_version: "fx",
+    content_current_date: "令和8年6月26日",
+    source_url: "https://example.invalid/903.html",
+    articles: [
+      {
+        label: "第1条",
+        heading: "(近似)",
+        text: "60万円と1万円と60万円と1万円と60万円と1万円と600点がある。",
+      },
+      {
+        label: "第2条",
+        heading: "(厳密)",
+        text: "上限は600万円とする。",
+      },
+    ],
+    appendix_tables: [],
+    supplements: [],
+  };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000903.json": rankLaw });
+  const restore = mockFetch(impl);
+  try {
+    const chunked = toolText(
+      await callTool("search_laws_by_content", {
+        query: "600万円",
+        law_id: "r122RG00000903",
+        scope: "chunk",
+        exact: false,
+      })
+    );
+    assert.equal(chunked.count, 2);
+    assert.equal(chunked.results[0].label, "第2条");
+    assert.equal(chunked.results[0].match_type, "exact");
+    assert.equal(chunked.results[1].label, "第1条");
+    assert.equal(chunked.results[1].match_type, "approximate");
+
+    const lawScoped = toolText(
+      await callTool("search_laws_by_content", {
+        query: "600万円",
+        law_id: "r122RG00000903",
+        scope: "law",
+        exact: false,
+      })
+    );
+    assert.equal(lawScoped.count, 1);
+    assert.equal(lawScoped.results[0].label, "第2条");
+    assert.equal(lawScoped.results[0].match_type, "exact");
+  } finally {
+    restore();
+  }
+});
