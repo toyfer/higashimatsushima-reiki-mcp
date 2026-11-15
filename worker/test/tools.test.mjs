@@ -110,6 +110,7 @@ test("get_article handles whole articles, paragraphs, items, version metadata, a
   const restore = mockFetch(impl);
   try {
     const article = toolText(await callTool("get_article", { law_id: "r122RG00000002", article_label: "第2条" }));
+    assert.equal(article.source_url, SAMPLE_LAW.source_url);
     assert.equal(article.title, SAMPLE_LAW.title);
     assert.equal(article.data_version, "fx");
     assert.equal(article.content_current_date, "令和8年6月26日");
@@ -117,7 +118,24 @@ test("get_article handles whole articles, paragraphs, items, version metadata, a
 
     const missingArticle = toolText(await callTool("get_article", { law_id: "r122RG00000002", article_label: "第99条" }));
     assert.equal(missingArticle.found, false);
+    assert.equal(missingArticle.source_url, SAMPLE_LAW.source_url);
     assert.equal(missingArticle.available_labels, "第1条, 第2条");
+    assert.equal(missingArticle.available_labels_truncated, false);
+
+    for (const variant of ["第１条", "1", "第 一 条"]) {
+      const normalized = toolText(await callTool("get_article", { law_id: "r122RG00000002", article_label: variant }));
+      assert.equal(normalized.found, true, variant);
+      assert.equal(normalized.article_label, "第1条", variant);
+      assert.equal(normalized.requested_article_label, variant, variant);
+    }
+    const withText = toolText(await callTool("get_article", { law_id: "r122RG00000002", article_label: "第1条" }));
+    assert.ok(withText.articles[0].paragraphs?.length || "text" in withText.articles[0]);
+    const light = toolText(
+      await callTool("get_article", { law_id: "r122RG00000002", article_label: "第1条", include_plain_text: false })
+    );
+    assert.equal(light.found, true);
+    assert.ok(light.articles[0].paragraphs.length > 0);
+    assert.ok(!("text" in light.articles[0]) || light.articles[0].paragraphs.length === 0);
 
     const para = toolText(await callTool("get_article", { law_id: "r122RG00000002", article_label: "第1条", paragraph: 2 }));
     assert.equal(para.found, true);
@@ -166,6 +184,9 @@ test("get_toc lists articles, units, chapters, deleted headings, pagination, and
   const restore = mockFetch(impl);
   try {
     const payload = toolText(await callTool("get_toc", { law_id: "r122RG00000002" }));
+    assert.equal(payload.source_url, SAMPLE_LAW.source_url);
+    assert.equal(payload.appendix_style_count, 0);
+    assert.deepEqual(payload.appendix_styles, []);
     assert.equal(payload.article_count, 2);
     assert.equal(payload.supplement_count, 2);
     assert.equal(payload.appendix_table_count, 2);
@@ -178,6 +199,8 @@ test("get_toc lists articles, units, chapters, deleted headings, pagination, and
     assert.equal(payload.appendix_tables[0].length, 40);
     assert.equal(payload.resources.length, 2);
     assert.equal(payload.resources[1].href, "word/r122FG00000002.rtf");
+    assert.equal(payload.resources[1].href_url, "https://example.invalid/word/r122FG00000002.rtf");
+    assert.equal(payload.resources[1].image_full_url, "https://example.invalid/word/r122FG00000002s.png");
     assert.equal(payload.next_offset, null);
 
     const paged = toolText(await callTool("get_toc", { law_id: "r122RG00000002", limit: 1 }));
@@ -231,6 +254,7 @@ test("get_unit returns appendix/supplement units, accepts aliases, and resolves 
   const restore = mockFetch(impl);
   try {
     const table = toolText(await callTool("get_unit", { law_id: "r122RG00000002", kind: "appendix_table", n: 2 }));
+    assert.equal(table.resource.href_url, "https://example.invalid/word/r122FG00000002.rtf");
     assert.equal(table.found, true);
     assert.equal(table.unit_id, "r122RG00000002#appendix_table-2");
     assert.equal(table.content_status, "external_resource_only");
@@ -263,6 +287,68 @@ test("get_unit returns appendix/supplement units, accepts aliases, and resolves 
     const outOfRange = toolText(await callTool("get_unit", { law_id: brokenMappingLaw.id, kind: "appendix_table", n: 1 }));
     assert.equal(outOfRange.resource, null);
     assert.equal(outOfRange.content_status, "complete");
+  } finally {
+    restore();
+  }
+});
+
+test("get_toc/get_unit expose appendix styles with resolved form resources (#115)", async () => {
+  const styleLaw = {
+    ...SAMPLE_LAW,
+    id: "r122RG00000020",
+    source_url: "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_honbun/r122RG00000020.html",
+    appendix_styles: ["様式第1号(第8条関係)", "様式第2号(第9条関係)\n申請者氏名"],
+    resources: [
+      { label: "様式第1号(第8条関係)", kind: "form", href: "word/form1.rtf", image_url: "word/form1s.png" },
+      { label: "様式第2号(第9条関係)", kind: "form", href: "word/form2.rtf", image_url: "" },
+    ],
+  };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000020.json": styleLaw });
+  const restore = mockFetch(impl);
+  try {
+    const toc = toolText(await callTool("get_toc", { law_id: styleLaw.id }));
+    assert.equal(toc.appendix_style_count, 2);
+    assert.deepEqual(toc.appendix_styles, ["様式第1号(第8条関係)", "様式第2号(第9条関係)"]);
+
+    const first = toolText(await callTool("get_unit", { law_id: styleLaw.id, kind: "style", n: 1 }));
+    assert.equal(first.kind, "appendix_style");
+    assert.equal(first.unit_id, "r122RG00000020#appendix_style-1");
+    assert.equal(first.content_status, "external_resource_only");
+    assert.equal(first.resource.href_url, "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_honbun/word/form1.rtf");
+    assert.equal(first.resource.image_full_url, "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_honbun/word/form1s.png");
+
+    const second = toolText(await callTool("get_unit", { law_id: styleLaw.id, kind: "appendix_style", n: 2 }));
+    assert.equal(second.content_status, "complete");
+    assert.match(second.text, /申請者氏名/);
+
+    const missing = toolText(await callTool("get_unit", { law_id: styleLaw.id, kind: "form", n: 9 }));
+    assert.equal(missing.found, false);
+    assert.deepEqual(missing.available_n, [1, 2]);
+  } finally {
+    restore();
+  }
+});
+
+test("get_article truncates a long available_labels list and points to get_toc (#115)", async () => {
+  const many = {
+    ...SAMPLE_LAW,
+    id: "r122RG00000021",
+    articles: Array.from({ length: 30 }, (_, i) => ({
+      label: `第${i + 1}条`,
+      heading: "",
+      paragraphs: [{ number: 1, text: "本文。", items: [] }],
+    })),
+  };
+  const { impl } = pagesRouter({ "/api/laws/r122RG00000021.json": many });
+  const restore = mockFetch(impl);
+  try {
+    const missing = toolText(await callTool("get_article", { law_id: many.id, article_label: "第99条" }));
+    assert.equal(missing.found, false);
+    assert.equal(missing.available_labels_truncated, true);
+    assert.equal(missing.available_label_count, 30);
+    assert.match(missing.available_labels, /30 labels total/);
+    assert.match(missing.available_labels_hint, /get_toc/);
+    assert.ok(missing.available_labels.length < 200);
   } finally {
     restore();
   }

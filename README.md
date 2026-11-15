@@ -14,7 +14,7 @@
 - **スコープ境界（やらないこと）**:
   - **過去時点スナップショット（`asof`）**: 公式 HTML が現在版のみを掲載しているため非対応とし、明確なエラーで拒否します。
   - **外部ファイル（RTF / PNG）の本文自動抽出**: ダウンロード形式の別表・様式は OCR や RTF 変換を行わず、`content_status: "external_resource_only"` と一次資料リンク（`resource`）を返して本文欠落の誤認を防ぎます。
-- **今後のロードマップ・設計記録**: アーキテクチャ判断、LLM 視点の UX 改善基準、および現在対応中の課題（`#110`〜`#112`, `#115`）の全体像は [`docs/roadmap-and-llm-ux.md`](docs/roadmap-and-llm-ux.md) にまとめています。
+- **今後のロードマップ・設計記録**: アーキテクチャ判断、LLM 視点の UX 改善基準、および対応を進めた課題（`#110`〜`#112`, `#115`）の全体像は [`docs/roadmap-and-llm-ux.md`](docs/roadmap-and-llm-ux.md) にまとめています。
 
 ## 使う側（LLM / MCP クライアント）向けガイド
 
@@ -38,8 +38,8 @@
 | `search_laws_by_title` | 例規名・例規番号・分類・ID による検索（要旨のみ） | `query`, `limit` | `api/search/title-index.json` |
 | `search_laws_by_content` | 2段階本文検索（bigram 候補抽出＋厳密語句照合） | `query`, `limit`, `law_id`, `operator`, `scope`, `group_by`, `exact`, `snippet_chars` | `api/search/manifest.json`, `postings-*.json`, `chunks-*.json`（`law_id` 指定時は個別 JSON のみ 1 fetch） |
 | `get_toc` | 条文見出し一覧、章節構造、前文・別表・附則の規模確認 | `law_id`, `offset`, `limit` | `api/laws/{law_id}.json` |
-| `get_article` | 条・項・号を指定した確定本文の取得 | `law_id`, `article_label`, `paragraph`, `item` | `api/laws/{law_id}.json` |
-| `get_unit` | 別表（`appendix_table` / `beppyo`）または附則（`supplement` / `suppl`）の個別取得 | `law_id`, `kind`, `n` | `api/laws/{law_id}.json` |
+| `get_article` | 条・項・号を指定した確定本文の取得（条番号の表記ゆれ正規化、`source_url` 返却） | `law_id`, `article_label`, `paragraph`, `item`, `include_plain_text` | `api/laws/{law_id}.json` |
+| `get_unit` | 別表（`appendix_table` / `beppyo`）、附則（`supplement` / `suppl`）または様式（`appendix_style` / `style`）の個別取得 | `law_id`, `kind`, `n` | `api/laws/{law_id}.json` |
 | `get_law` | 1 例規の全文 JSON 取得（小規模例規・要綱向け） | `law_id` | `api/laws/{law_id}.json` |
 
 ツール引数の詳細仕様は [`worker/README.md`](worker/README.md) を参照してください。
@@ -51,12 +51,12 @@
    - 制度内容・金額・条件から探す場合は `search_laws_by_content` を使います。検索結果の `snippet` は前後抜粋（既定 280 文字）のため、**回答や引用の根拠として確定する前に必ず `get_article` / `get_unit` / 小規模例規の `get_law` で一次本文を確認してください**。
 2. **原則 `get_toc` を挟んでから必要な条・単位だけを取得する**
    - 大規模条例にいきなり `get_law` を呼ぶと応答が極端に大きくなります（例：`r122RG00000066` 東松島市市税条例は約 834 KB / 36.4 万文字）。
-   - まず `get_toc` で `article_count` や `has_body_text`・`appendix_table_count`・`supplement_count` を確認し、条文がある場合は `get_article`（必要に応じて `paragraph` / `item` 指定）や `get_unit` を使います。
+   - まず `get_toc` で `source_url`、`article_count`、`has_body_text`、`appendix_table_count`、`appendix_style_count`、`supplement_count` を確認し、条文がある場合は `get_article`（必要に応じて `paragraph` / `item` 指定）や `get_unit` を使います。
    - 要綱・ガイドラインなど `article_count === 0` かつ `has_body_text === true` の例規や、数条のみの短い例規を読む場合に限り `get_law` が適しています。
 3. **本文検索の仕様と制約を踏まえて判定する**
    - **2 文字以上必須**: インデックスが 2-gram のみのため、1 文字（例: `税`）は検索対象外です。
    - **厳密一致と数値境界**: 既定の `exact: true` では `600点`＋`500万円` による `600万円` 誤一致や、`3,600万円` の中での `600万円` 誤一致を除外します。表記ゆれも含めて広げたい場合のみ `exact: false` を使います。
-   - **網羅性と欠落の確認**: 応答の `completeness`（`complete` / `partial`）、`truncation_reasons`、`index_caps`（1 語最大 50 posting・1 例規最大 3 posting・1 回最大 46 fetch / 300 候補）および別表の `content_status`（`external_resource_only`）を確認し、上限到達や外部ファイル未収録を「該当なし」と誤認しないようにします。
+   - **網羅性と欠落の確認**: 応答の `completeness`（今回の fetch / 走査予算に対する `complete` / `partial`）、`index_cap_reached`、`capped_terms`、`completeness_note`、`truncation_reasons`、`index_caps`（1 語最大 50 posting・1 例規最大 3 posting・1 回最大 46 fetch / 300 候補）および別表の `content_status`（`external_resource_only`）を確認し、上限到達や外部ファイル未収録を「該当なし」と誤認しないようにします。
 
 ## アーキテクチャと静的 API
 
@@ -86,15 +86,15 @@
 
 ### 別表と外部リソースの扱い
 
-`resources[]` には別表と様式（`form`）のダウンロードリンク（RTF / PNG）が混在するため、単純な配列位置ではなく `appendix_table_resource_index` によって別表と外部リソースを厳密に対応付けています（`appendix_table_resource_index[0] === 2` なら 1 番目の別表に対応する資料は `resources[2]`、該当なしは `null`）。また、様式本文は `appendix_styles` へ分離され、見出しのみで実体が RTF/PNG にある別表には `content_status: "external_resource_only"` が付与されます。
+`resources[]` には別表と様式（`form`）のダウンロードリンク（RTF / PNG）が混在するため、単純な配列位置ではなく `appendix_table_resource_index` によって別表と外部リソースを厳密に対応付けています（`appendix_table_resource_index[0] === 2` なら 1 番目の別表に対応する資料は `resources[2]`、該当なしは `null`）。また、様式本文は `appendix_styles` へ分離され、見出しのみで実体が RTF/PNG にある別表・様式には `content_status: "external_resource_only"` が付与され、Worker は相対 `href` / `image_url` に加えて解決済み `href_url` / `image_full_url` を返します。様式は `get_toc` の `appendix_style_count` / `appendix_styles` で把握し、`get_unit` の `kind: "appendix_style"` で個別取得できます。
 
 ### 本文検索インデックスの実測値
 
 `api/search/manifest.json` に記録される bigram TF-IDF インデックスは、Pages ビルド時に生成されます（Worker はリクエスト時にコーパス全体を走査しません）。
 
-| 項目 | 現行値・実測（`data_version: 0623d75154345ebe` 時点） |
+| 項目 | 現行値・実測（`data_version: d1db3e79d19f85e2` 時点） |
 |---|---|
-| 対象例規数 / チャンク数 | `1,192` 例規 / `19,684` チャンク |
+| 対象例規数 / チャンク数 | `1,192` 例規 / `19,619` チャンク |
 | チャンクシャード / ポスティングシャード | `40` チャンクシャード（`chunk_shard_size: 500`） + `16` ポスティングシャード = 計 `56` シャード（`manifest.json` 含め `57` ファイル） |
 | 総サイズ / 最大シャード | `31.5 MiB` / チャンク最大 `916 KiB`（`chunks-002.json`）・ポスティング最大 `614 KiB`（`postings-15.json`） |
 | インデックス上限 | 1 ターム最大 `50` postings（1 例規・1 ターム最大 `3` postings） |

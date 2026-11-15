@@ -270,6 +270,11 @@ test("tools/list exposes complete input schemas for all 7 tools", async () => {
       assert.ok(tool.description && tool.description.length > 10, `${tool.name} needs a description`);
       assert.equal(tool.inputSchema?.type, "object", tool.name);
       assert.equal(tool.inputSchema?.additionalProperties, false, tool.name);
+      assert.deepEqual(
+        tool.annotations,
+        { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        `${tool.name} must declare read-only MCP annotations`
+      );
       const props = Object.keys(tool.inputSchema?.properties || {});
       for (const req of tool.inputSchema?.required || []) {
         assert.ok(props.includes(req), `${tool.name} required key ${req} missing from properties`);

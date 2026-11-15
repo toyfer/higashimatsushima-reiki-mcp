@@ -16,6 +16,9 @@ const SNIPPET_CHARS = 280;
 const SNIPPET_WINDOW = SNIPPET_CHARS;
 const MIN_SNIPPET_CHARS = 80;
 const MAX_SNIPPET_CHARS = 800;
+const MAX_INLINE_AVAILABLE_LABELS = 20;
+
+const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
 class ProtocolError extends Error {
   constructor(code, message) {
@@ -493,6 +496,21 @@ function lawUnits(law) {
       resource,
     });
   });
+  const styles = Array.isArray(law.appendix_styles) ? law.appendix_styles : [];
+  styles.forEach((style, position) => {
+    const text = String(style || "");
+    const firstLine = text.split("\n")[0].trim();
+    const resource = styleResource(law, position, text);
+    units.push({
+      kind: "appendix_style",
+      label: (firstLine || `様式${position + 1}`).slice(0, 40),
+      heading: "",
+      unitIndex: position + 1,
+      text,
+      content_status: !text.includes("\n") && resource ? "external_resource_only" : "complete",
+      resource,
+    });
+  });
   return units;
 }
 
@@ -507,6 +525,163 @@ function appendixResource(law, position) {
     return null;
   }
   return resources[position] || null;
+}
+
+function resolveResourceUrl(value, sourceUrl) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const base = String(sourceUrl || "").trim();
+  if (!base) return raw;
+  try {
+    return new URL(raw, base).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function formatResource(resource, sourceUrl) {
+  if (!resource || typeof resource !== "object") return null;
+  const href = String(resource.href || "");
+  const imageUrl = String(resource.image_url || "");
+  return {
+    label: resource.label || "",
+    href,
+    href_url: resolveResourceUrl(href, sourceUrl),
+    image_url: imageUrl,
+    image_full_url: resolveResourceUrl(imageUrl, sourceUrl),
+  };
+}
+
+const KANJI_DIGITS = { "〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9 };
+const KANJI_UNITS = { "十": 10, "百": 100, "千": 1000 };
+
+function parseArticleNumberPart(value) {
+  const compact = String(value || "").normalize("NFKC").replace(/\s+/g, "");
+  if (!compact) return null;
+  if (/^\d+$/.test(compact)) {
+    const number = Number(compact);
+    return Number.isSafeInteger(number) && number > 0 ? number : null;
+  }
+  if (/^[0-9一二三四五六七八九十百千〇零]+$/.test(compact) && /[一二三四五六七八九十百千〇零]/.test(compact)) {
+    if (/^[〇零一二三四五六七八九]+$/.test(compact)) {
+      const digits = [...compact].map((char) => KANJI_DIGITS[char]);
+      if (digits.some((digit) => digit === undefined)) return null;
+      const number = digits.reduce((total, digit) => total * 10 + digit, 0);
+      return number > 0 ? number : null;
+    }
+    let total = 0;
+    let current = 0;
+    for (const char of compact) {
+      if (KANJI_DIGITS[char] !== undefined) {
+        current = KANJI_DIGITS[char];
+      } else if (KANJI_UNITS[char] !== undefined) {
+        total += (current || 1) * KANJI_UNITS[char];
+        current = 0;
+      } else {
+        return null;
+      }
+    }
+    total += current;
+    return total > 0 ? total : null;
+  }
+  return null;
+}
+
+const ARTICLE_NUMBER_PART = "[0-9一二三四五六七八九十百千〇零]+";
+const ARTICLE_LABEL_INPUT_RE = new RegExp(
+  `^第?\\s*(${ARTICLE_NUMBER_PART})\\s*条?((?:\\s*(?:の|ノ|-|_|\\.)\\s*${ARTICLE_NUMBER_PART})*)$`
+);
+
+function normalizeArticleLabel(value) {
+  const compact = String(value || "").normalize("NFKC").replace(/[\s　]+/g, "").trim();
+  if (!compact) return "";
+  const match = ARTICLE_LABEL_INPUT_RE.exec(compact);
+  if (!match) return compact;
+  const main = parseArticleNumberPart(match[1]);
+  if (main === null) return compact;
+  const tail = match[2] || "";
+  const parts = tail ? tail.split(/[のノ\-_.]/).filter(Boolean) : [];
+  const numbers = [main];
+  for (const part of parts) {
+    const number = parseArticleNumberPart(part);
+    if (number === null) return compact;
+    numbers.push(number);
+  }
+  return `第${numbers[0]}条` + numbers.slice(1).map((number) => `の${number}`).join("");
+}
+
+function canonicalArticleLabel(value) {
+  const normalized = normalizeArticleLabel(value);
+  const match = /^第(\d+)条((?:の\d+)*)$/.exec(normalized);
+  if (!match) return normalized;
+  return normalized;
+}
+
+function summarizeAvailableLabels(labels, requestedLabel) {
+  if (labels.length <= MAX_INLINE_AVAILABLE_LABELS) {
+    return { available_labels: labels.join(", "), available_labels_truncated: false };
+  }
+  const head = labels.slice(0, 5);
+  const tail = labels.slice(-3);
+  const requestedIndex = requestedLabel ? labels.indexOf(requestedLabel) : -1;
+  const nearest = [];
+  if (requestedIndex >= 0) {
+    for (const index of [requestedIndex - 1, requestedIndex, requestedIndex + 1]) {
+      if (index >= 0 && index < labels.length && !nearest.includes(labels[index])) nearest.push(labels[index]);
+    }
+  }
+  return {
+    available_labels: `${head.join(", ")}, … (${labels.length} labels total) …, ${tail.join(", ")}`,
+    available_labels_truncated: true,
+    available_label_count: labels.length,
+    available_labels_hint: "Call get_toc to browse all article labels and headings.",
+    ...(nearest.length ? { nearest_labels: nearest } : {}),
+  };
+}
+
+function styleKey(value) {
+  const compact = String(value || "").normalize("NFKC").replace(/\s+/g, "");
+  const match = /^様式(?:第)?([0-9一二三四五六七八九十百千〇零]+)号((?:(?:の|ノ|-)[0-9一二三四五六七八九十百千〇零]+)*)/.exec(compact);
+  if (!match) return "";
+  const main = parseArticleNumberPart(match[1]);
+  if (main === null) return "";
+  const parts = (match[2] || "").split(/[のノ-]/).filter(Boolean).map((part) => parseArticleNumberPart(part));
+  if (parts.some((part) => part === null)) return "";
+  return [main, ...parts].join("-");
+}
+
+function styleResource(law, position, text) {
+  const resources = Array.isArray(law.resources) ? law.resources : [];
+  const explicit = Array.isArray(law.appendix_style_resource_index) ? law.appendix_style_resource_index : null;
+  if (explicit) {
+    const index = explicit[position];
+    if (Number.isInteger(index) && index >= 0 && index < resources.length) return resources[index] || null;
+    return null;
+  }
+  const styles = Array.isArray(law.appendix_styles) ? law.appendix_styles : [];
+  const firstLine = String(text || styles[position] || "").split("\n")[0].trim();
+  const wantedKey = styleKey(firstLine);
+  const formResources = resources.filter(
+    (resource) => resource && typeof resource === "object" && (resource.kind === "form" || (!resource.kind && styleKey(resource.label)))
+  );
+  if (wantedKey) {
+    const keyMatches = formResources.filter((resource) => styleKey(resource.label) === wantedKey);
+    if (keyMatches.length === 1) return keyMatches[0];
+    if (keyMatches.length > 1) {
+      const sameKeyStyles = styles.filter((style) => styleKey(String(style || "").split("\n")[0].trim()) === wantedKey);
+      const ordinal = Math.max(0, sameKeyStyles.indexOf(styles[position]));
+      return keyMatches[ordinal] || keyMatches[0] || null;
+    }
+    const firstLineCompact = firstLine.normalize("NFKC").replace(/\s+/g, "");
+    const prefixMatches = formResources.filter((resource) => {
+      const label = String(resource.label || "").normalize("NFKC").replace(/\s+/g, "");
+      return label && (firstLineCompact.startsWith(label) || label.startsWith(firstLineCompact));
+    });
+    if (prefixMatches.length === 1) return prefixMatches[0];
+    if (prefixMatches.length > 1) return null;
+  }
+  if (formResources.length === styles.length && formResources[position]) return formResources[position];
+  return null;
 }
 
 function unitId(lawId, unit) {
@@ -578,27 +753,33 @@ async function callTool(env, name, args) {
   if (name === "get_article") {
     rejectAsof(input);
     const lawId = requireCanonicalLawId(input.law_id);
-    const label = String(input.article_label || "").trim();
-    if (!label) throw invalidParams("article_label is required");
+    const rawLabel = String(input.article_label || "").trim();
+    if (!rawLabel) throw invalidParams("article_label is required");
     if (input.item !== undefined && input.item !== null && String(input.item).trim() !== "" && (input.paragraph === undefined || input.paragraph === null || String(input.paragraph).trim() === "")) {
       throw invalidParams("paragraph is required when item is given");
     }
+    const includePlainText =
+      input.include_plain_text === undefined ? true : input.include_plain_text !== false && String(input.include_plain_text) !== "false";
     const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
     if (!law) {
       return textResult(
         JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
       );
     }
+    const sourceUrl = law.source_url || "";
     const articles = Array.isArray(law.articles) ? law.articles : [];
-    const found = articles.filter((article) => article.label === label);
+    let found = articles.filter((article) => article.label === rawLabel);
+    let matchedLabel = rawLabel;
     if (!found.length) {
-      const available = articles.map((article) => article.label).join(", ");
-      return textResult(JSON.stringify({ law_id: lawId, article_label: label, found: false, available_labels: available }, null, 2));
+      const normalized = canonicalArticleLabel(rawLabel);
+      if (normalized && normalized !== rawLabel) {
+        found = articles.filter((article) => article.label === normalized);
+        if (found.length) matchedLabel = normalized;
+      }
     }
-    const article = found[0];
-    const paragraphWanted = toPositiveInt(input.paragraph);
-    const itemWanted = toPositiveInt(input.item);
-    if (paragraphWanted === null) {
+    if (!found.length) {
+      const labels = articles.map((article) => String(article.label || "")).filter(Boolean);
+      const summary = summarizeAvailableLabels(labels, canonicalArticleLabel(rawLabel));
       return textResult(
         JSON.stringify(
           {
@@ -606,15 +787,40 @@ async function callTool(env, name, args) {
             title: law.title,
             data_version: law.data_version || "",
             content_current_date: law.content_current_date || "",
-            article_label: label,
-            heading: article.heading || "",
-            found: true,
-            articles: found,
+            article_label: canonicalArticleLabel(rawLabel),
+            requested_article_label: rawLabel,
+            found: false,
+            article_count: articles.length,
+            source_url: sourceUrl,
+            ...summary,
           },
           null,
           2
         )
       );
+    }
+    const article = found[0];
+    const base = {
+      law_id: lawId,
+      title: law.title,
+      data_version: law.data_version || "",
+      content_current_date: law.content_current_date || "",
+      article_label: matchedLabel,
+      ...(matchedLabel !== rawLabel ? { requested_article_label: rawLabel } : {}),
+      heading: article.heading || "",
+      source_url: sourceUrl,
+    };
+    const paragraphWanted = toPositiveInt(input.paragraph);
+    const itemWanted = toPositiveInt(input.item);
+    if (paragraphWanted === null) {
+      const returned = includePlainText
+        ? found
+        : found.map((entry) => {
+            if (!entry || typeof entry !== "object" || !Array.isArray(entry.paragraphs) || entry.paragraphs.length === 0) return entry;
+            const { text: _text, ...rest } = entry;
+            return rest;
+          });
+      return textResult(JSON.stringify({ ...base, found: true, articles: returned }, null, 2));
     }
     const paragraphs = Array.isArray(article.paragraphs) ? article.paragraphs : [];
     const paragraph = paragraphs.find((entry) => Number(entry.number) === paragraphWanted);
@@ -622,9 +828,7 @@ async function callTool(env, name, args) {
       return textResult(
         JSON.stringify(
           {
-            law_id: lawId,
-            title: law.title,
-            article_label: label,
+            ...base,
             found: false,
             available_paragraphs: paragraphs.map((entry) => Number(entry.number)),
           },
@@ -640,9 +844,7 @@ async function callTool(env, name, args) {
         return textResult(
           JSON.stringify(
             {
-              law_id: lawId,
-              title: law.title,
-              article_label: label,
+              ...base,
               paragraph: paragraphWanted,
               found: false,
               available_items: items.map((entry) => String(entry.label)),
@@ -655,12 +857,7 @@ async function callTool(env, name, args) {
       return textResult(
         JSON.stringify(
           {
-            law_id: lawId,
-            title: law.title,
-            data_version: law.data_version || "",
-            content_current_date: law.content_current_date || "",
-            article_label: label,
-            heading: article.heading || "",
+            ...base,
             found: true,
             paragraph: { number: paragraphWanted, text: paragraph.text, items: [item] },
           },
@@ -672,12 +869,7 @@ async function callTool(env, name, args) {
     return textResult(
       JSON.stringify(
         {
-          law_id: lawId,
-          title: law.title,
-          data_version: law.data_version || "",
-          content_current_date: law.content_current_date || "",
-          article_label: label,
-          heading: article.heading || "",
+          ...base,
           found: true,
           paragraph: { number: paragraphWanted, text: paragraph.text, items },
         },
@@ -698,6 +890,7 @@ async function callTool(env, name, args) {
     const articles = Array.isArray(law.articles) ? law.articles : [];
     const supplements = Array.isArray(law.supplements) ? law.supplements : [];
     const tables = Array.isArray(law.appendix_tables) ? law.appendix_tables : [];
+    const styles = Array.isArray(law.appendix_styles) ? law.appendix_styles : [];
     const chapters = Array.isArray(law.chapters) ? law.chapters : [];
     const resources = Array.isArray(law.resources) ? law.resources : [];
     const offset = Math.max(Number(input.offset) || 0, 0);
@@ -712,9 +905,11 @@ async function callTool(env, name, args) {
           data_version: law.data_version || "",
           content_current_date: law.content_current_date || "",
           article_count: articles.length,
+          source_url: law.source_url || "",
           ...preambleSummary(law),
           supplement_count: supplements.length,
           appendix_table_count: tables.length,
+          appendix_style_count: styles.length,
           offset,
           limit,
           next_offset: nextOffset,
@@ -728,11 +923,7 @@ async function callTool(env, name, args) {
           // They belong to navigation, so the table of contents lists them
           // instead of the parser reporting a lost structure (issue #50).
           deleted_headings: Array.isArray(law.deleted_headings) ? law.deleted_headings : [],
-          resources: resources.map((resource) =>
-            resource
-              ? { label: resource.label || "", href: resource.href || "", image_url: resource.image_url || "" }
-              : null
-          ),
+          resources: resources.map((resource) => formatResource(resource, law.source_url)),
           articles: page.map((article) => ({
             label: article.label,
             heading: article.heading || "",
@@ -745,6 +936,10 @@ async function callTool(env, name, args) {
           appendix_tables: tables.map((table, position) => {
             const firstLine = String(table || "").split("\n")[0].trim();
             return (firstLine || `別表${position + 1}`).slice(0, 40);
+          }),
+          appendix_styles: styles.map((style, position) => {
+            const firstLine = String(style || "").split("\n")[0].trim();
+            return (firstLine || `様式${position + 1}`).slice(0, 40);
           }),
         },
         null,
@@ -762,9 +957,12 @@ async function callTool(env, name, args) {
       table: "appendix_table",
       supplement: "supplement",
       suppl: "supplement",
+      appendix_style: "appendix_style",
+      style: "appendix_style",
+      form: "appendix_style",
     };
     const kind = kindAliases[rawKind];
-    if (!kind) throw invalidParams("kind must be appendix_table (or beppyo) or supplement (or suppl)");
+    if (!kind) throw invalidParams("kind must be appendix_table (or beppyo), supplement (or suppl), or appendix_style (or style)");
     const n = toPositiveInt(input.n);
     if (n === null) throw invalidParams("n must be a 1-based unit number");
     const law = await fetchPagesJson(env, `/api/laws/${lawId}.json`, { allowNotFound: true });
@@ -773,16 +971,35 @@ async function callTool(env, name, args) {
         JSON.stringify({ law_id: lawId, found: false, reason: "not_found", message: "The published API has no law with this law_id." }, null, 2)
       );
     }
-    const units = kind === "appendix_table" ? (Array.isArray(law.appendix_tables) ? law.appendix_tables : []) : Array.isArray(law.supplements) ? law.supplements : [];
+    const units =
+      kind === "appendix_table"
+        ? Array.isArray(law.appendix_tables)
+          ? law.appendix_tables
+          : []
+        : kind === "appendix_style"
+          ? Array.isArray(law.appendix_styles)
+            ? law.appendix_styles
+            : []
+          : Array.isArray(law.supplements)
+            ? law.supplements
+            : [];
     if (n > units.length) {
       return textResult(
         JSON.stringify({ law_id: lawId, title: law.title, kind, n, found: false, available_n: units.map((_, position) => position + 1) }, null, 2)
       );
     }
     const text = String(units[n - 1] || "");
-    const label = kind === "appendix_table" ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40) : units.length > 1 ? `附則${n}` : "附則";
-    const unitResource = kind === "appendix_table" ? appendixResource(law, n - 1) : null;
-    const contentStatus = kind === "appendix_table" && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
+    const label =
+      kind === "appendix_table"
+        ? (text.split("\n")[0].trim() || `別表${n}`).slice(0, 40)
+        : kind === "appendix_style"
+          ? (text.split("\n")[0].trim() || `様式${n}`).slice(0, 40)
+          : units.length > 1
+            ? `附則${n}`
+            : "附則";
+    const unitResource =
+      kind === "appendix_table" ? appendixResource(law, n - 1) : kind === "appendix_style" ? styleResource(law, n - 1, text) : null;
+    const contentStatus = (kind === "appendix_table" || kind === "appendix_style") && unitResource && !text.includes("\n") ? "external_resource_only" : "complete";
     return textResult(
       JSON.stringify(
         {
@@ -797,9 +1014,7 @@ async function callTool(env, name, args) {
           found: true,
           text,
           content_status: contentStatus,
-          resource: unitResource
-            ? { label: unitResource.label || "", href: unitResource.href || "", image_url: unitResource.image_url || "" }
-            : null,
+          resource: formatResource(unitResource, law.source_url),
           source_url: law.source_url || "",
         },
         null,
@@ -908,7 +1123,7 @@ async function callTool(env, name, args) {
               highlights: window.highlights,
               match_type: matchType,
               content_status: entry.unit.content_status || "complete",
-              resource: entry.unit.resource || null,
+              resource: formatResource(entry.unit.resource, law.source_url),
             });
           }
         }
@@ -977,7 +1192,7 @@ async function callTool(env, name, args) {
             score,
             match_type: entry.matched.every((match) => !match.approximate) ? "exact" : "approximate",
             content_status: entry.unit.content_status || "complete",
-            resource: entry.unit.resource || null,
+            resource: formatResource(entry.unit.resource, law.source_url),
             matched_terms: entry.matched.map((match) => match.term),
             unmatched_terms: terms.map((term) => term.raw).filter((raw) => !entry.matched.some((match) => match.term === raw)),
           };
@@ -1004,6 +1219,9 @@ async function callTool(env, name, args) {
             completeness: truncated ? "partial" : "complete",
             truncated,
             truncation_reasons: truncated ? ["result_limit"] : [],
+            index_cap_reached: false,
+            capped_terms: [],
+            completeness_note: "Single-ordinance search reads the full published law JSON; the global bigram posting cap does not apply, but the display limit can still hide further matches in this ordinance.",
             results,
           },
           null,
@@ -1054,6 +1272,9 @@ async function callTool(env, name, args) {
       (a, b) => shardGramCount.get(b) - shardGramCount.get(a) || a - b
     );
     const shardIds = allShardIds.slice(0, MAX_POSTING_SHARDS).sort((a, b) => a - b);
+    if (allShardIds.length > MAX_POSTING_SHARDS) reasons.add("posting_shard_limit");
+    const maxPostingsPerTerm = Number(manifest.max_postings_per_term) > 0 ? Number(manifest.max_postings_per_term) : null;
+    const cappedGrams = new Set();
     const scores = new Map();
     const gramChunks = new Map();
     for (const shard of shardIds) {
@@ -1067,6 +1288,7 @@ async function callTool(env, name, args) {
       for (const [gram, shardId] of gramShards) {
         if (shardId !== shard) continue;
         const entries = Array.isArray(postings[gram]) ? postings[gram] : [];
+        if (maxPostingsPerTerm !== null && entries.length >= maxPostingsPerTerm) cappedGrams.add(gram);
         const chunks = new Set();
         for (const entry of entries) {
           if (!Array.isArray(entry) || entry.length < 2) continue;
@@ -1230,7 +1452,7 @@ async function callTool(env, name, args) {
             highlights: window.highlights,
             match_type: nextMatchType,
             content_status: row.content_status || "complete",
-            resource: row.resource || null,
+            resource: formatResource(row.resource, row.source_url),
             _score: score,
           });
         }
@@ -1261,7 +1483,7 @@ async function callTool(env, name, args) {
           highlights: window.highlights,
           match_type: resultMatchType,
           content_status: row.content_status || "complete",
-          resource: row.resource || null,
+          resource: formatResource(row.resource, row.source_url),
           matched_terms: matched.map((entry) => entry.raw),
           unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
         });
@@ -1287,7 +1509,7 @@ async function callTool(env, name, args) {
         highlights: window.highlights,
         match_type: resultMatchType,
         content_status: row.content_status || "complete",
-        resource: row.resource || null,
+        resource: formatResource(row.resource, row.source_url),
         matched_terms: matched.map((entry) => entry.raw),
         unmatched_terms: terms.map((term) => term.raw).filter((raw) => !matched.some((entry) => entry.raw === raw)),
       });
@@ -1405,8 +1627,18 @@ async function callTool(env, name, args) {
     // Only fetch/scan caps mean "some evidence was never examined"; the display
     // limit and the per-law cap mean "more matches exist than shown".
     const coverageReasons = truncationReasons.filter(
-      (reason) => reason === "pages_fetch_budget" || reason === "candidate_scan_limit"
+      (reason) => reason === "pages_fetch_budget" || reason === "candidate_scan_limit" || reason === "posting_shard_limit"
     );
+    const cappedTerms = terms.filter((term) => term.bigrams.some((gram) => cappedGrams.has(gram))).map((term) => term.raw);
+    const indexCapReached = cappedTerms.length > 0;
+    const completenessNote =
+      coverageReasons.length > 0 && indexCapReached
+        ? "Coverage is partial in two independent ways: this call stopped at a fetch/scan/shard budget, and at least one query term reached the prebuilt index posting cap (max_postings_per_term). Absence in the results is not proof that no ordinance contains the term."
+        : coverageReasons.length > 0
+          ? "Coverage is partial because this call stopped at a fetch/scan/shard budget. Absence in the results is not proof that no ordinance contains the term."
+          : indexCapReached
+            ? `This call examined every candidate its budgets allowed, but the prebuilt index itself is capped: at least one query term reached max_postings_per_term=${maxPostingsPerTerm} (and at most 3 postings per law per term), so matches outside the indexed top postings cannot appear. See capped_terms; do not treat absence as corpus-wide proof.`
+            : "This call examined every candidate allowed by its budgets, and no queried term reached the prebuilt index posting cap.";
     const indexCaps = {
       posting_terms: manifest.posting_terms ?? null,
       posting_entries: manifest.posting_entries ?? null,
@@ -1438,6 +1670,9 @@ async function callTool(env, name, args) {
           completeness: coverageReasons.length > 0 ? "partial" : "complete",
           truncated: truncationReasons.length > 0,
           truncation_reasons: truncationReasons,
+          index_cap_reached: indexCapReached,
+          capped_terms: cappedTerms,
+          completeness_note: completenessNote,
           index_caps: indexCaps,
           results,
         },
@@ -1452,14 +1687,16 @@ async function callTool(env, name, args) {
 const TOOLS = [
   {
     name: "reiki_status",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Return the published static API meta and health (generation time, site current date, data version, law count, failure count) and whether the body-search index is published.",
+      "Start here when freshness matters. Return the published static API meta and health (generation time, content_current_date, data version, law count, failure count) and whether the body-search index is published. All tools in this server are read-only and serve only the currently published version; asof is rejected wherever it appears.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "search_laws_by_title",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Search Higashimatsushima ordinances by title keyword, ordinance number, law ID, or classification fragment. Reads the lightweight title index and returns summaries only (id, title, ordinance number, classification, article count, source_url); use get_law for the body.",
+      "Search Higashimatsushima ordinances by title keyword, ordinance number, law ID, or classification fragment. This is an entry-point search only: it reads the lightweight title index and returns summaries only (id, title, ordinance number, classification, article count, source_url), never bodies. Confirm any body text with get_toc followed by get_article or get_unit, or get_law only for a short ordinance or one with article_count 0 and body text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1472,8 +1709,9 @@ const TOOLS = [
   },
   {
     name: "search_laws_by_content",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Two-stage body search over Higashimatsushima ordinances: bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text. exact=true (default) keeps only chunks where every query term appears as a contiguous phrase, and a phrase that starts or ends with a digit must sit on a number boundary, so 600万円 does not match inside 3,600万円. exact=false still reports contiguous matches as match_type=exact and labels bigram-only hits approximate. Returns snippet with highlights, match_type, matched/unmatched terms, and completeness counters. Results are bounded: at most 50 postings per term in the index, 3 chunks per law per term, 46 Pages fetches and 300 examined candidates per call. scope=chunk requires all terms in one chunk; scope=law aggregates per ordinance and returns matches[] with the evidence chunk for each term. law_id restricts the search to one ordinance and reports the scope it actually applied.",
+      "Two-stage body search over Higashimatsushima ordinances: bigram TF-IDF postings generate candidates, then each candidate chunk is verified against its full text. exact=true (default) keeps only chunks where every query term appears as a contiguous phrase, and a phrase that starts or ends with a digit must sit on a number boundary, so 600万円 does not match inside 3,600万円. exact=false still reports contiguous matches as match_type=exact and labels bigram-only hits approximate. Returns snippet with highlights, match_type, matched/unmatched terms, and completeness counters. Results are bounded: at most 50 postings per term in the index, 3 chunks per law per term, 46 Pages fetches and 300 examined candidates per call. scope=chunk requires all terms in one chunk; scope=law aggregates per ordinance and returns matches[] with the evidence chunk for each term. law_id restricts the search to one ordinance and reports the scope it actually applied. Snippets are excerpts only: confirm quoted text with get_article, get_unit, or get_law for a short or body-only ordinance. completeness covers only this call's fetch/scan budgets; index_cap_reached, capped_terms and completeness_note separately report whether a term reached the prebuilt 50-posting index cap, which completeness alone does not prove.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1492,8 +1730,9 @@ const TOOLS = [
   },
   {
     name: "get_law",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Fetch one ordinance in full: articles, paragraphs, items, supplements, appendix tables and history, by law ID such as r122RG00000002. Only the currently published version is available; asof is rejected.",
+      "Fetch one ordinance in full only when it is short, or when article_count is 0 and the whole text lives in body_text/preamble (guidelines and similar). For an ordinance with many articles this response can be hundreds of kilobytes; use get_toc first, then get_article or get_unit for the needed part. Returns articles, paragraphs, items, supplements, appendix tables, appendix styles and history by law ID such as r122RG00000002. Only the currently published version is available; asof is rejected.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1506,15 +1745,17 @@ const TOOLS = [
   },
   {
     name: "get_article",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Fetch one article of an ordinance by its label such as 第1条 or 第2条の2. Optionally select one paragraph (paragraph=2) and one item (item=2) instead of the whole article. Every response carries data_version and content_current_date so the published version is visible at article level.",
+      "Fetch one article of an ordinance as confirmed body text for citation. article_label is normalized: 第１条, 1, 36の3の2, 第36条-3-2 and kanji forms such as 第二十三条 are accepted in addition to the exact label. Optionally select one paragraph (paragraph=2) and one item (item=2, requires paragraph) instead of the whole article. Every response carries source_url, data_version and content_current_date. By default paragraphs and the duplicate plain text field are both returned; set include_plain_text=false to omit the duplicate text when paragraphs are present and save tokens.",
     inputSchema: {
       type: "object",
       properties: {
         law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" },
-        article_label: { type: "string", description: "Article label such as 第1条" },
+        article_label: { type: "string", description: "Article label such as 第1条; normalized forms such as 第１条, 1, 36の3の2, 第36条-3-2 and 第二十三条 are also accepted" },
         paragraph: { type: "number", description: "Optional paragraph number such as 2" },
         item: { type: "number", description: "Optional item number such as 2. Requires paragraph." },
+        include_plain_text: { type: "boolean", description: "Default true for compatibility. Set false to omit each article's duplicate joined text field when structured paragraphs are present, saving tokens." },
         asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
       },
       required: ["law_id", "article_label"],
@@ -1523,8 +1764,9 @@ const TOOLS = [
   },
   {
     name: "get_toc",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Return the table of contents of one ordinance: article labels and headings with offset/limit pagination, plus supplement and appendix table counts and labels. Also reports has_body_text, body_text_chars, preamble_count and body_text_preview, so an ordinance whose whole text lives in body_text/preamble (article_count 0) is distinguishable from an empty one: read those with get_law. Use it before get_article or get_unit.",
+      "Use this before get_article or get_unit on any ordinance whose size you do not know. Return the table of contents of one ordinance: source_url, article labels and headings with offset/limit pagination, plus supplement, appendix table and appendix_style (form) counts and labels. Also reports has_body_text, body_text_chars, preamble_count and body_text_preview, so an ordinance whose whole text lives in body_text/preamble (article_count 0) is distinguishable from an empty one: read those with get_law. resources carry both relative href/image_url and resolved href_url/image_full_url.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1539,13 +1781,14 @@ const TOOLS = [
   },
   {
     name: "get_unit",
+    annotations: READ_ONLY_ANNOTATIONS,
     description:
-      "Fetch one appendix table or one supplement of an ordinance without loading the whole body: kind=appendix_table (alias beppyo) or supplement (alias suppl), with a 1-based n.",
+      "Fetch one appendix table, supplement, or appendix style (form) of an ordinance as confirmed body text without loading the whole ordinance: kind=appendix_table (aliases beppyo, table), supplement (alias suppl), or appendix_style (aliases style, form), with a 1-based n matching get_toc counts. The response carries source_url and, for a downloadable form/table, resource with both the published relative href/image_url and resolved href_url/image_full_url; content_status=external_resource_only means the body lives in that file.",
     inputSchema: {
       type: "object",
       properties: {
         law_id: { type: "string", description: "Law ID matching ^r\\d+RG\\d+$" },
-        kind: { type: "string", description: "appendix_table (beppyo) or supplement (suppl)" },
+        kind: { type: "string", description: "appendix_table (beppyo, table), supplement (suppl), or appendix_style (style, form)" },
         n: { type: "number", description: "1-based unit number" },
         asof: { type: "string", description: "Unsupported: the service publishes only the current version" },
       },

@@ -1,6 +1,6 @@
 # Search golden set
 
-`tools/search_eval.mjs` runs the Worker in-process against the published Pages index and checks that real queries still behave the way they are supposed to. It exists because a ranking or matching change can be green in unit tests and still return the wrong ordinance: the unit tests use small fixtures, the golden set uses the published index, 1,192 ordinances and `chunk_count` 19,684 in `manifest.json`.
+`tools/search_eval.mjs` runs the Worker in-process against the published Pages index and checks that real queries still behave the way they are supposed to. It exists because a ranking or matching change can be green in unit tests and still return the wrong ordinance: the unit tests use small fixtures, the golden set uses the published index, 1,192 ordinances and `chunk_count` 19,619 in `manifest.json`.
 
 ## When it runs
 
@@ -52,4 +52,4 @@ Run the case against the current index before committing it. A case that already
 
 ## Limits
 
-Fourteen cases do not cover the whole 19,684-chunk corpus. The set is a regression lock on the behaviours that have already gone wrong (bigram coincidence, numeric boundaries, appendix resources, law-scoped fetches), not a quality score. Adding a case whenever a question gets answered wrongly is what keeps it useful.
+Seventeen cases do not cover the whole published chunk corpus. The set is a regression lock on the behaviours that have already gone wrong (bigram coincidence, numeric boundaries, appendix resources, law-scoped fetches), not a quality score. Adding a case whenever a question gets answered wrongly is what keeps it useful.
