@@ -1,6 +1,6 @@
 ## Higashimatsushima ordinance MCP Worker
 
-This Worker wraps the GitHub Pages static API and exposes it as a stateless MCP endpoint. It holds no database and no copy of the ordinance bodies. Every tool call reads the published JSON on GitHub Pages, so the city site remains the primary source and GitHub Pages remains the published copy.
+This Worker wraps the GitHub Pages static API and exposes it as a stateless MCP endpoint. For the project overview, recommended LLM query flow, and roadmap, see [`README.md`](../README.md) and [`docs/roadmap-and-llm-ux.md`](../docs/roadmap-and-llm-ux.md). It holds no database and no copy of the ordinance bodies. Every tool call reads the published JSON on GitHub Pages, so the city site remains the primary source and GitHub Pages remains the published copy.
 
 | Endpoint | Purpose |
 |---|---|
@@ -16,7 +16,7 @@ This Worker wraps the GitHub Pages static API and exposes it as a stateless MCP 
 |---|---|---|
 | `reiki_status` | none | `api/meta.json`, `api/health.json`, `api/search/manifest.json` |
 | `search_laws_by_title` | `query`, optional `limit` | `api/search/title-index.json` |
-| `search_laws_by_content` | `query`, optional `limit`, optional `law_id` | `api/search/manifest.json`, `postings-*.json`, `chunks-*.json`; with `law_id`, `api/laws/{law_id}.json` |
+| `search_laws_by_content` | `query`, optional `limit`, `law_id`, `operator`, `scope`, `group_by`, `exact`, `snippet_chars` | `api/search/manifest.json`, `postings-*.json`, `chunks-*.json`; with `law_id`, `api/laws/{law_id}.json` |
 | `get_law` | `law_id` | `api/laws/{law_id}.json` |
 | `get_article` | `law_id`, `article_label`, optional `paragraph`, optional `item` | `api/laws/{law_id}.json` |
 | `get_toc` | `law_id`, optional `offset`, optional `limit` | `api/laws/{law_id}.json` |
@@ -39,6 +39,7 @@ Law IDs must match `^r\d+RG\d+$`, for example `r122RG00000002`. Upper and lower 
 | `scope` | `chunk` (default) / `law` | `chunk`: every term must appear in the same chunk. `law`: every term must appear somewhere in the same ordinance |
 | `group_by` | `chunk` / `law` | Collapse results per ordinance; `law` whenever `scope=law` |
 | `exact` | `true` (default) / `false` | `false` keeps bigram-only hits and labels them `approximate` |
+| `snippet_chars` | 80-800 | Snippet window size around the match (default 280) |
 
 Each result carries `match_type` (`exact` / `approximate`), `matched_terms`, `unmatched_terms`, a query-aware `snippet` with `highlights: [{term, start, end, match_type}]` (offsets are relative to `snippet`), and `unit_id` when a result maps to an appendix table or supplement. In `scope=law` each result also has `matches[]`, one evidence entry per matched term with its own label, snippet and highlights.
 

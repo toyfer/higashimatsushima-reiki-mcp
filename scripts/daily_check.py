@@ -16,13 +16,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from reiki_common import MENU_URL, USER_AGENT
+
 # Errors worth recording as a page error instead of aborting the crawl. HTTPException
 # (IncompleteRead, BadStatusLine, ...) does not inherit from OSError (issue #101).
 FETCH_ERRORS = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
 
-MENU_URL = "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html"
 TAIKEI_URL = "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_taikei/taikei_default.html"
-USER_AGENT = "higashimatsushima-reiki-mcp/0.1 (+daily public-page change check)"
 CURRENT_RE = re.compile(r"内容現在\s*（?([^\s<）)]+(?:年|/)[^\s<）)]*)")
 HONBUN_RE = re.compile(r"reiki_honbun/(r\d+RG\d+\.html)", re.IGNORECASE)
 TAIKEI_PAGE_RE = re.compile(r"r_taikei_[0-9_]+\.html$", re.IGNORECASE)

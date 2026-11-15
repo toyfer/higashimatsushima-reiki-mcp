@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
-from urllib.parse import urljoin
 
 MENU_URL = "https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html"
 USER_AGENT = "higashimatsushima-reiki-mcp/0.2 (+daily public-page change check)"
