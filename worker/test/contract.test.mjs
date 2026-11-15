@@ -37,7 +37,8 @@ fixtures = [
         <div class="chapter"><p class="num"><span class="num">第1章</span> <span class="title">総則</span></p></div>
         <p>第5節 鉱産税 削除</p>
         <p>第1条 本部を置く。</p>
-        <p>別表第1(第1条関係) 被害認定基準</p><p>1 全壊 50パーセント以上</p>
+        <p>附則</p><p>この要綱は公布の日から施行する。</p>
+        <p>別表第1(第1条関係) 災害対策本部における特別支援措置の対象となる被害認定基準の詳細区分表</p><p>1 全壊 50パーセント以上</p>
         <div class="form_section"><p class="num"><a href="#" onClick="fileDownloadAction2('honbun_1.rtf')"><span>様式第1号</span><span>(第14条関係)</span></a></p></div>
         <div class="form_section"><p class="num"><a href="#" onClick="fileDownloadAction2('honbun_2.rtf')"><span>別表第2</span><span>(第5条関係)</span></a></p></div>
         <div id="e1" class="xref_frame cm"><p><img src="/reiki/honbun_1.png"></p></div>
@@ -130,6 +131,24 @@ test("Python parse_honbun + search_index output works end-to-end in the Worker",
     assert.equal(scoped.count, 1);
     assert.equal(scoped.results[0].matches.length, 2);
     assert.ok(scoped.results[0].matches.some((m) => m.resource?.href === "honbun_2.rtf"));
+
+    const globalAppendix = toolText(await callTool("search_laws_by_content", { query: "詳細区分表", scope: "law" }));
+    assert.equal(globalAppendix.count, 1);
+    assert.equal(globalAppendix.results[0].unit_id, "r122RG00001013#appendix_table-1");
+    assert.equal(globalAppendix.results[0].match_type, "exact");
+    const [appHl] = globalAppendix.results[0].highlights;
+    assert.equal(globalAppendix.results[0].snippet.slice(appHl.start, appHl.end), "詳細区分表");
+
+    const globalBoundary = toolText(await callTool("search_laws_by_content", { query: "被害認定基準", scope: "law" }));
+    assert.equal(globalBoundary.count, 1);
+    assert.equal(globalBoundary.results[0].unit_id, "r122RG00001013#appendix_table-1");
+    assert.equal(globalBoundary.results[0].match_type, "exact");
+    const [bHl] = globalBoundary.results[0].highlights;
+    assert.equal(globalBoundary.results[0].snippet.slice(bHl.start, bHl.end), "被害認定基準");
+
+    const globalSupp = toolText(await callTool("search_laws_by_content", { query: "この要綱", scope: "law" }));
+    assert.equal(globalSupp.count, 1);
+    assert.equal(globalSupp.results[0].unit_id, "r122RG00001013#supplement-1");
   } finally {
     restore();
   }
