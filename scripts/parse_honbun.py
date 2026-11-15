@@ -6,11 +6,13 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from reiki_common import html_to_text
+from reiki_common import clean_text
 
 PRIMARY_RE = re.compile(r'<div id="primary".*?<!-- /本文 -->', re.S)
 # The page repeats every structural heading in a table of contents before the
@@ -36,8 +38,15 @@ HISTORY_NUMBER_RE = re.compile(r"^[^\s]{0,30}第[0-9０-９]+号$")
 # 「第9条の2の2」「第36条の3の2」のように枝番が 2 段以上続く例規がある。
 # 1 段だけを許すと番号が切り詰められ、ラベルが衝突して本文先頭に「の2」が残る (issue #97)。
 ARTICLE_START_RE = re.compile(r"^第([0-9０-９]+)条((?:の[0-9０-９]+)*)\s*(.*)$")
+ARTICLE_REFERENCE_TAIL_RE = re.compile(
+    r"^(?:第[0-9０-９一二三四五六七八九十]+(?:項|号|目)|各号|及び|並びに|若しくは|又は|から(?!第[0-9０-９]+条まで\s*(?:[\(（]\s*)?削除)|まで|に|を|で|は|が|と|の|も|へ|より|、|。)"
+)
+ARTICLE_CALLOUT_ONLY_RE = re.compile(r"^[\(（][^()（）]*見出し[^()（）]*[\)）]\s*$")
 HEADING_LINE_RE = re.compile(r"^[\(（].+[\)）]$")
-SUPPLEMENT_RE = re.compile(r"^附\s*則")
+SUPPLEMENT_RE = re.compile(
+    r"^附\s*則(?=$|\s*[\(（〔抄]|\s+(?!第[0-9０-９]|別表|[にをではがともへからまでより]))"
+)
+SUPPLEMENT_HEAD_RE = re.compile(r"^附\s*則")
 # Structural headings. The city marks chapters with <div class="chapter"><p
 # class="num"><span>第N章</span><span>見出し</span></p></div> in the body and
 # section headings the same way (issue #50). Without this, chapter/section
@@ -70,9 +79,13 @@ APPENDIX_TABLE_RE = re.compile(r"^別表")
 # 別表第1 and 別表(第2条関係) are both used by the city site; the second form
 # was silently appended to the last supplement (issue #38).
 # Table titles appear as 別表, 別表第1, 別表1(第2条関係) and 別表(第2条関係).
-APPENDIX_START_RE = re.compile(r"^別表(?:第?[0-9０-９]+|\s|[\(（]|$)")
-# Prose such as 別表に掲げる… must stay body text and must not raise a warning.
-APPENDIX_TITLE_HINT_RE = re.compile(r"^別表[0-9０-９第\(（]")
+APPENDIX_START_RE = re.compile(
+    r"^(?:附則)?別表(?:第?[0-9０-９]+(?:(?:の|[-－―‐‑])[0-9０-９]+)*)?(?=$|\s|[\(（])(?!\s*(?:に|を|で|は|が|と|も|へ|から|まで|より|。|、|の(?![0-9０-９])))"
+)
+# Prose such as 別表に掲げる… or 別表第1に定める… must stay body text without warning.
+APPENDIX_TITLE_HINT_RE = re.compile(
+    r"^(?:附則)?別表[0-9０-９第\(（](?!.*?(?:に|を|で|は|が|と|も|へ|から|まで|より))"
+)
 # 様式第N号 sections are separate forms, not a continuation of the table that
 # happens to precede them (issue #61). Anchored on the 号 or an opening paren so
 # ordinary prose such as 様式は… stays body text.
@@ -143,12 +156,113 @@ def clean_title(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().lstrip("○").strip()
 
 
-def extract_lines(html: str) -> tuple[list[str], str]:
+_BLOCK_BREAK_TAGS = {"br", "p", "div", "tr", "li"}
+_VOID_TAGS = {"br", "img", "hr", "meta", "link", "input", "col", "area", "base", "embed", "param", "source", "track", "wbr"}
+
+
+@dataclass(frozen=True)
+class ExtractedLine:
+    text: str
+    in_table: bool = False
+    in_article: bool = False
+    in_table_section: bool = False
+    in_form_section: bool = False
+    in_s_head: bool = False
+
+
+class _StructuredLineExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: list[tuple[str, frozenset[str]]] = []
+        self._buf: list[str] = []
+        self._skip = 0
+        self.lines: list[ExtractedLine] = []
+        self.seen_classes: set[str] = set()
+
+    def _current_flags(self) -> tuple[bool, bool, bool, bool, bool]:
+        in_table = False
+        in_article = False
+        in_table_section = False
+        in_form_section = False
+        in_s_head = False
+        for tag, classes in self._stack:
+            if tag == "table":
+                in_table = True
+            if "article" in classes:
+                in_article = True
+            if "table_section" in classes:
+                in_table_section = True
+            if "form_section" in classes:
+                in_form_section = True
+            if "s-head" in classes:
+                in_s_head = True
+        return in_table, in_article, in_table_section, in_form_section, in_s_head
+
+    def _flush(self) -> None:
+        if not self._buf:
+            return
+        text = clean_text("".join(self._buf))
+        self._buf.clear()
+        if not text:
+            return
+        in_table, in_article, in_table_section, in_form_section, in_s_head = self._current_flags()
+        self.lines.append(
+            ExtractedLine(
+                text=text,
+                in_table=in_table,
+                in_article=in_article,
+                in_table_section=in_table_section,
+                in_form_section=in_form_section,
+                in_s_head=in_s_head,
+            )
+        )
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t in {"script", "style"}:
+            self._skip += 1
+        if t in _BLOCK_BREAK_TAGS:
+            self._flush()
+        raw_class = ""
+        for k, v in attrs:
+            if k.lower() == "class" and v:
+                raw_class = v
+                break
+        classes = frozenset(raw_class.split())
+        self.seen_classes.update(classes)
+        if t not in _VOID_TAGS:
+            self._stack.append((t, classes))
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in {"script", "style"} and self._skip:
+            self._skip -= 1
+        if t in {"p", "div", "tr", "li"}:
+            self._flush()
+        for idx in range(len(self._stack) - 1, -1, -1):
+            if self._stack[idx][0] == t:
+                del self._stack[idx:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip:
+            self._buf.append(data)
+
+
+def extract_structured_lines(html: str) -> tuple[list[ExtractedLine], str, frozenset[str]]:
     match = PRIMARY_RE.search(html)
     scope = match.group(0) if match else html
-    text = html_to_text(TOC_TITLE_RE.sub("", TOC_ITEM_RE.sub("", scope)))
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines, scope
+    cleaned = TOC_TITLE_RE.sub("", TOC_ITEM_RE.sub("", scope))
+    parser = _StructuredLineExtractor()
+    parser.feed(cleaned)
+    parser.close()
+    parser._flush()
+    return parser.lines, scope, frozenset(parser.seen_classes)
+
+
+def extract_lines(html: str) -> tuple[list[str], str]:
+    items, scope, _classes = extract_structured_lines(html)
+    return [item.text for item in items], scope
 
 
 _PAREN_OPENS = {"(", "（"}
@@ -234,7 +348,7 @@ def parse_resources(scope: str, source_url: str) -> list[dict[str, Any]]:
                     break
         # Identity, not just order: appendix tables and 様式 share this list but
         # do not correspond to law.appendix_tables one-to-one (issue #61).
-        kind = "appendix" if label.startswith("別表") else "form"
+        kind = "appendix" if label.startswith(("別表", "附則別表")) else "form"
         resources.append(
             {
                 "label": label,
@@ -261,17 +375,26 @@ def build_resource_map(appendix_tables: list[str], resources: list[dict[str, Any
     """
     by_key: dict[tuple[int, int], int] = {}
     unnumbered: list[int] = []
+    unnumbered_annex: list[int] = []
     for position, resource in enumerate(resources):
         if resource.get("kind") != "appendix":
             continue
-        key = appendix_table_key(str(resource.get("label") or ""))
+        label = str(resource.get("label") or "").lstrip()
+        key = appendix_table_key(label)
         if key is None:
-            unnumbered.append(position)
+            if label.startswith("附則別表"):
+                unnumbered_annex.append(position)
+            else:
+                unnumbered.append(position)
         elif key not in by_key:
             by_key[key] = position
     mapping: list[int | None] = []
     for table in appendix_tables:
-        key = appendix_table_key(table)
+        stripped = table.lstrip()
+        if stripped.startswith("附則別表"):
+            mapping.append(unnumbered_annex.pop(0) if unnumbered_annex else None)
+            continue
+        key = appendix_table_key(stripped)
         if key is not None:
             mapping.append(by_key.get(key))
             continue
@@ -307,7 +430,11 @@ def parse_history(html: str) -> list[dict[str, str]]:
 
 
 def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = "") -> dict[str, Any]:
-    lines, _scope = extract_lines(html)
+    line_items, _scope, seen_classes = extract_structured_lines(html)
+    lines = [item.text for item in line_items]
+    has_article_markup = "article" in seen_classes
+    has_table_section_markup = "table_section" in seen_classes
+    has_s_head_markup = "s-head" in seen_classes
     chapters = parse_chapters(_scope)
     resources = parse_resources(_scope, source_url)
     # Body chapter lines appear verbatim ("第2章 見出し"), while the table
@@ -388,8 +515,8 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
             appendix_styles[-1] = appendix_styles[-1] + "\n" + deferred_heading
         deferred_heading = ""
 
-    for raw_line in lines:
-        line = raw_line.strip()
+    for item in line_items:
+        line = item.text.strip()
         if not line:
             continue
         if title and line in {title, f"○{title}"} and mode == "preamble" and not preamble:
@@ -399,133 +526,157 @@ def parse_honbun(html: str, *, law_id: str, source_url: str, index_title: str = 
         if ordinance_number and line == ordinance_number and mode == "preamble":
             continue
 
-        if (
-            HEADING_LINE_RE.match(line)
-            and not ITEM_RE.match(line)
-            and mode in {"preamble", "article"}
-            and not APPENDIX_TABLE_RE.match(line)
-            and not is_amendment_note(line)
-        ):
-            # A heading line introduces the article that follows it. Keep it for
-            # that article only and never append it to the article already being
-            # parsed, which mixed the next article's heading into the previous
-            # article text (issue #40).
-            if current_article is None:
-                pending_heading = line
-            else:
-                deferred_heading = line
-            continue
-
-        # A chapter/section heading line belongs to the structure, not to
-        # the previous article (issue #50). Skip it and remember it for
-        # the articles that follow.
-        if line in chapter_texts:
-            absorb_deferred_heading()
-            if chapter_index < len(chapters):
-                entry = chapters[chapter_index]
-                chapter_index += 1
-                if entry.get("kind") == "section":
-                    current_section = entry
-                else:
-                    current_chapter = entry
-                    current_section = None
-            continue
-        if CHAPTER_LINE_RE.match(line) or SECTION_LINE_RE.match(line):
-            # Table-of-contents entries ("第2章 見出し(第N条―第M条)") are
-            # navigation, not body text: skip them silently. A bare
-            # chapter line that the body scope did not provide means the
-            # structure was lost, so warn instead of mixing it into a
-            # body paragraph (issue #50).
-            absorb_deferred_heading()
-            base, deleted = heading_identity(line)
-            if any(line.startswith(text) for text in chapter_texts) or any(
-                base == text or base.startswith(text) for text in chapter_texts
+        if not item.in_table:
+            if (
+                HEADING_LINE_RE.match(line)
+                and not ITEM_RE.match(line)
+                and mode in {"preamble", "article"}
+                and not APPENDIX_TABLE_RE.match(line)
+                and not is_amendment_note(line)
             ):
+                if current_article is None:
+                    pending_heading = line
+                else:
+                    deferred_heading = line
                 continue
-            if deleted:
-                # 削除 sections have no body by definition, so this is not a
-                # lost heading: keep it for navigation and stay quiet.
-                deleted_headings.append(line)
-                continue
-            structure_warnings.append(f"chapter_heading_unstructured:{line[:30]}")
-            continue
 
-        article_match = ARTICLE_START_RE.match(line)
-        # 附則・改正附則・別表・様式の中にも「第1条」形式の行がある。ここで
-        # mode を戻すと附則の条文が本則 articles[] に混入し、同名ラベルが
-        # 何十件も並ぶ (issue #95)。本文の条だけが article に切り替える。
-        starts_article = (
-            bool(article_match)
-            and not SUPPLEMENT_RE.match(line)
-            and mode not in {"supplement", "appendix", "style"}
-        )
-        if deferred_heading:
-            if starts_article:
-                if not pending_heading:
+            if line in chapter_texts:
+                absorb_deferred_heading()
+                if chapter_index < len(chapters):
+                    entry = chapters[chapter_index]
+                    chapter_index += 1
+                    if entry.get("kind") == "section":
+                        current_section = entry
+                    else:
+                        current_chapter = entry
+                        current_section = None
+                continue
+            if CHAPTER_LINE_RE.match(line) or SECTION_LINE_RE.match(line):
+                absorb_deferred_heading()
+                base, deleted = heading_identity(line)
+                if any(line.startswith(text) for text in chapter_texts) or any(
+                    base == text or base.startswith(text) for text in chapter_texts
+                ):
+                    continue
+                if deleted:
+                    deleted_headings.append(line)
+                    continue
+                structure_warnings.append(f"chapter_heading_unstructured:{line[:30]}")
+                continue
+
+            article_match = ARTICLE_START_RE.match(line)
+            article_context_ok = (
+                not item.in_table_section
+                and not item.in_form_section
+                and not item.in_s_head
+                and (item.in_article or not has_article_markup)
+            )
+            if article_match and not item.in_article:
+                rest_candidate = article_match.group(3).strip()
+                if ARTICLE_REFERENCE_TAIL_RE.match(rest_candidate) or ARTICLE_CALLOUT_ONLY_RE.match(rest_candidate):
+                    article_match = None
+            starts_article = (
+                bool(article_match)
+                and article_context_ok
+                and not SUPPLEMENT_HEAD_RE.match(line)
+                and mode not in {"supplement", "appendix", "style"}
+            )
+            if deferred_heading:
+                if starts_article:
+                    if not pending_heading:
+                        pending_heading = deferred_heading
+                elif current_article is not None:
+                    current_article["_lines"].append(deferred_heading)
+                elif not pending_heading:
                     pending_heading = deferred_heading
-            elif current_article is not None:
-                current_article["_lines"].append(deferred_heading)
-            elif not pending_heading:
-                pending_heading = deferred_heading
-            deferred_heading = ""
+                deferred_heading = ""
 
-        if starts_article and article_match is not None:
-            flush_article()
-            mode = "article"
-            number_text = article_match.group(1)
-            branch = article_match.group(2)
-            rest = article_match.group(3).strip()
-            heading = pending_heading
-            pending_heading = ""
-            body_first = rest
-            if rest.startswith(("(", "（")):
-                inline_heading, inline_body = split_leading_heading(rest)
-                if inline_heading:
-                    heading, body_first = inline_heading, inline_body
-            label = f"第{to_int(number_text)}条"
-            if branch:
-                label += "".join(f"の{to_int(part)}" for part in branch.split("の") if part)
-            current_article = {
-                "number": to_int(number_text),
-                "branch": to_int(branch.split("の")[1]) if branch else None,
-                "label": label,
-                "heading": heading,
-                "chapter": current_chapter["number"] if current_chapter else "",
-                "chapter_title": current_chapter["title"] if current_chapter else "",
-                "section": current_section["number"] if current_section else "",
-                "section_title": current_section["title"] if current_section else "",
-                "_lines": [line],
-                "paragraphs": [],
-            }
-            if body_first:
-                current_article["paragraphs"].append({"number": 1, "text": body_first, "items": []})
-            continue
+            if starts_article and article_match is not None:
+                flush_article()
+                mode = "article"
+                number_text = article_match.group(1)
+                branch = article_match.group(2)
+                rest = article_match.group(3).strip()
+                heading = pending_heading
+                pending_heading = ""
+                body_first = rest
+                if rest.startswith(("(", "（")):
+                    inline_heading, inline_body = split_leading_heading(rest)
+                    if inline_heading:
+                        heading, body_first = inline_heading, inline_body
+                label = f"第{to_int(number_text)}条"
+                if branch:
+                    label += "".join(f"の{to_int(part)}" for part in branch.split("の") if part)
+                current_article = {
+                    "number": to_int(number_text),
+                    "branch": to_int(branch.split("の")[1]) if branch else None,
+                    "label": label,
+                    "heading": heading,
+                    "chapter": current_chapter["number"] if current_chapter else "",
+                    "chapter_title": current_chapter["title"] if current_chapter else "",
+                    "section": current_section["number"] if current_section else "",
+                    "section_title": current_section["title"] if current_section else "",
+                    "_lines": [line],
+                    "paragraphs": [],
+                }
+                if body_first:
+                    current_article["paragraphs"].append({"number": 1, "text": body_first, "items": []})
+                continue
 
-        if SUPPLEMENT_RE.match(line):
-            absorb_deferred_heading()
-            flush_article()
-            mode = "supplement"
-            supplements.append(line)
-            continue
-
-        if STYLE_SECTION_RE.match(line):
-            # 様式第N号 is its own form. Concatenating it onto the last appendix
-            # table corrupted that table's body (issue #61).
-            absorb_deferred_heading()
-            flush_article()
-            mode = "style"
-            appendix_styles.append(line)
-            continue
-
-        if APPENDIX_TABLE_RE.match(line):
-            if APPENDIX_START_RE.match(line):
+            if item.in_table_section:
                 absorb_deferred_heading()
                 flush_article()
                 mode = "appendix"
                 appendix_tables.append(line)
                 continue
-            if mode in {"article", "supplement"} and APPENDIX_TITLE_HINT_RE.match(line):
-                structure_warnings.append(f"appendix_marker_unparsed:{line[:30]}")
+
+            if item.in_form_section:
+                if STYLE_SECTION_RE.match(line):
+                    absorb_deferred_heading()
+                    flush_article()
+                    mode = "style"
+                    appendix_styles.append(line)
+                    continue
+                if line.startswith(("別表", "附則別表")):
+                    absorb_deferred_heading()
+                    flush_article()
+                    mode = "appendix"
+                    appendix_tables.append(line)
+                    continue
+
+            starts_supplement = (
+                (item.in_s_head and SUPPLEMENT_HEAD_RE.match(line))
+                or (not has_s_head_markup and SUPPLEMENT_RE.match(line))
+            )
+            if starts_supplement:
+                absorb_deferred_heading()
+                flush_article()
+                mode = "supplement"
+                supplements.append(line)
+                continue
+
+            if STYLE_SECTION_RE.match(line):
+                absorb_deferred_heading()
+                flush_article()
+                mode = "style"
+                appendix_styles.append(line)
+                continue
+
+            if APPENDIX_TABLE_RE.match(line) and not has_table_section_markup:
+                if APPENDIX_START_RE.match(line):
+                    absorb_deferred_heading()
+                    flush_article()
+                    mode = "appendix"
+                    appendix_tables.append(line)
+                    continue
+                if mode in {"article", "supplement"} and APPENDIX_TITLE_HINT_RE.match(line):
+                    structure_warnings.append(f"appendix_marker_unparsed:{line[:30]}")
+        elif deferred_heading:
+            if current_article is not None:
+                current_article["_lines"].append(deferred_heading)
+            elif not pending_heading:
+                pending_heading = deferred_heading
+            deferred_heading = "" 
 
         if mode == "preamble":
             preamble.append(line)

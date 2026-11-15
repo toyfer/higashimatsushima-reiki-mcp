@@ -604,3 +604,107 @@ class SupplementOnlyOrdinanceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructureBoundaryAndTableContextTest(unittest.TestCase):
+    """Issue #110: prevent prose references and table cells from splitting body structure."""
+
+    REALISTIC_BODY_AND_TABLES = primary_page(
+        "東松島市交付要綱",
+        '<div><div class="eline"><div class="head"><p><span>○東松島市交付要綱</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="head"><p><span>令和7年4月1日</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="head"><p><span>訓令甲第1号</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="article"><p class="title"><span class="cm">(交付金の額)</span></p>'
+        '<p class="num"><span class="num cm">第7条</span>　<span class="clause"><span class="p cm">次の各号による。</span></span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="item"><p class="num"><span class="num cm">(1)</span>　<span class="p cm">ア 交付額</span></p></div></div></div>\n'
+        '<div><div class="eline"><p class="p"><span class="p cm"><a href="#e1" class="inline quote">別表第1</a>に定める10アール当たり交付単価に面積を乗じて得た額。</span></p></div></div>\n'
+        '<div><div class="eline"><div class="article"><p class="title"><span class="cm">(申請手続)</span></p>'
+        '<p class="num"><span class="num cm">第8条</span>　<span class="clause"><span class="p cm">市長に申請する。</span></span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="article"><p class="num"><span class="num cm">第9条から第11条まで</span>　<span class="clause"><span class="p cm">削除</span></span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="article"><p class="title"><span class="cm">(読替え)</span></p>'
+        '<p class="num"><span class="num cm">第12条</span>　<span class="clause"><span class="p cm">次の表のとおり読み替える。</span></span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="table_frame"><div class="table-wrapper"><table>'
+        '<tr><td><p class="p"><a class="inline quote">第12条第1項</a></p></td><td><p class="p">旧文言</p></td><td><p class="p">新文言</p></td></tr>'
+        '<tr><td><p class="p"><a class="inline quote">第2条</a><span>(見出しを含む。)</span></p></td><td><p class="p">A</p></td><td><p class="p">B</p></td></tr>'
+        '<tr><td><p class="p">第8条、第9条</p></td><td><p class="p">C</p></td><td><p class="p">D</p></td></tr>'
+        '</table></div></div></div></div>\n'
+        '<div><div class="eline"><p class="s-head"><span class="title cm"><span class="word-space">附</span>則</span></p></div></div>\n'
+        '<div><div class="eline"><div class="clause"><p class="p">施行する。</p></div></div></div>\n'
+        '<div><div class="eline"><div class="table_frame"><div class="table-wrapper"><table>'
+        '<tr><td><p class="p">附則第12条第1項</p></td><td><p class="p">特例</p></td></tr>'
+        '</table></div></div></div></div>\n'
+        '<div><div class="eline"><p class="s-head"><span class="title cm"><span class="word-space">附</span>則</span><span class="date cm">(平成18年3月20日</span><span class="number cm">条例第10号)</span></p></div></div>\n'
+        '<div><div class="eline"><div class="table_section"><p class="num"><span class="num cm">附則別表第1</span><span class="table-title cm">(附則第2条関係)</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="table_frame"><div class="table-wrapper"><table><tr><td><p class="p">切替内容</p></td></tr></table></div></div></div></div>\n'
+        '<div><div class="eline"><div class="table_section"><p class="num"><span class="num cm">別表第1</span><span class="table-title cm">(第7条関係)</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="table_frame"><div class="table-wrapper"><table><tr><td><p class="p">10a当たり 3,000円</p></td></tr></table></div></div></div></div>\n'
+        '<div><div class="eline"><div class="table_section"><p class="num"><span class="num cm">別表第2</span><span class="table-title cm">(第7条関係)</span></p></div></div></div>\n'
+        '<div><div class="eline"><div class="table_frame"><div class="table-wrapper"><table>'
+        '<tr><td><p class="p">別表第1に規定する地域</p></td><td><p class="p">別表第1に準ずる。</p></td></tr>'
+        '</table></div></div></div></div>',
+    )
+
+    def test_realistic_html_preserves_articles_deleted_range_supplements_and_tables(self) -> None:
+        law = parse_honbun(
+            self.REALISTIC_BODY_AND_TABLES,
+            law_id="r122RG00001796",
+            source_url="https://example.test/reiki_honbun/r122RG00001796.html",
+        )
+        labels = [article["label"] for article in law["articles"]]
+        self.assertEqual(labels, ["第7条", "第8条", "第9条", "第12条"])
+        self.assertEqual(len(labels), len(set(labels)))
+        by_label = {article["label"]: article for article in law["articles"]}
+        self.assertIn("別表第1に定める10アール当たり交付単価", by_label["第7条"]["text"])
+        self.assertEqual(by_label["第9条"]["text"], "第9条から第11条まで 削除")
+        self.assertIn("第12条第1項", by_label["第12条"]["text"])
+        self.assertIn("第2条(見出しを含む。)", by_label["第12条"]["text"])
+        self.assertEqual(by_label["第12条"]["heading"], "(読替え)")
+
+        self.assertEqual(len(law["supplements"]), 2)
+        self.assertIn("附則第12条第1項", law["supplements"][0])
+        self.assertTrue(law["supplements"][1].startswith("附則(平成18年3月20日"))
+
+        self.assertEqual(len(law["appendix_tables"]), 3)
+        self.assertTrue(law["appendix_tables"][0].startswith("附則別表第1(附則第2条関係)"))
+        self.assertTrue(law["appendix_tables"][1].startswith("別表第1(第7条関係)"))
+        self.assertTrue(law["appendix_tables"][2].startswith("別表第2(第7条関係)"))
+        self.assertIn("別表第1に規定する地域", law["appendix_tables"][2])
+        self.assertIn("別表第1に準ずる。", law["appendix_tables"][2])
+        self.assertEqual(law["parse_warnings"], [])
+
+    def test_fallback_regex_guards_for_plain_html_without_semantic_classes(self) -> None:
+        html = primary_page(
+            "簡易HTMLテスト条例",
+            "<p>(趣旨)</p>\n"
+            "<p>第1条 この条例は、別表第1に定める事項について規定する。</p>\n"
+            "<p>別表第1に定める額を基礎とする。</p>\n"
+            "<p>第2条 次の表により読み替える。</p>\n"
+            "<table><tr><td><p>第2条(見出しを含む。)</p></td><td><p>第1条第1項</p></td></tr></table>\n"
+            "<p>附則</p>\n"
+            "<p>この条例は公布の日から施行する。</p>\n"
+            "<table><tr><td><p>附則第3条第1項</p></td></tr></table>\n"
+            "<p>別表第1(第1条関係)</p>\n"
+            "<p>1 基本単価 1,000円</p>",
+        )
+        law = parse_honbun(html, law_id="r122RG00009998", source_url="https://example.test/9998.html")
+        self.assertEqual([a["label"] for a in law["articles"]], ["第1条", "第2条"])
+        self.assertIn("別表第1に定める額を基礎とする。", law["articles"][0]["text"])
+        self.assertIn("第2条(見出しを含む。)", law["articles"][1]["text"])
+        self.assertEqual(len(law["supplements"]), 1)
+        self.assertIn("附則第3条第1項", law["supplements"][0])
+        self.assertEqual(len(law["appendix_tables"]), 1)
+        self.assertTrue(law["appendix_tables"][0].startswith("別表第1(第1条関係)"))
+        self.assertEqual(law["parse_warnings"], [])
+
+    def test_annex_appendix_does_not_steal_unnumbered_main_appendix_resource(self) -> None:
+        html = primary_page(
+            "東松島市テスト条例",
+            '<div><div class="eline"><div class="article"><p class="num"><span class="num cm">第1条</span>　<span class="clause">本文。</span></p></div></div></div>\n'
+            '<div><div class="eline"><p class="s-head"><span class="title cm"><span class="word-space">附</span>則</span></p></div></div>\n'
+            '<div><div class="eline"><div class="table_section"><p class="num"><span class="num cm">附則別表</span></p></div></div></div>\n'
+            '<div><div class="eline"><div class="table_frame"><table><tr><td><p class="p">内容</p></td></tr></table></div></div></div>\n'
+            '<div><div class="eline"><div class="form_section"><p class="num"><a href="#" onClick="fileDownloadAction2(\'main.rtf\')"><span>別表</span><span>(第1条関係)</span></a></p></div></div></div>',
+        )
+        law = parse_honbun(html, law_id="r122RG00009997", source_url="https://example.test/9997.html")
+        self.assertEqual(len(law["appendix_tables"]), 2)
+        self.assertEqual(law["appendix_table_resource_index"], [None, 0])
