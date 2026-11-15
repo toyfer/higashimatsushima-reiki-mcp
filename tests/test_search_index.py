@@ -292,3 +292,46 @@ class ContentStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppendixUnitIndexAndOverflowHeadingTest(unittest.TestCase):
+    def test_appendix_and_supplement_emit_1_based_unit_index(self):
+        built = build_search_index(
+            [
+                law(
+                    id="r122RG00000308",
+                    title="単位確認条例",
+                    articles=[{"label": "第1条", "heading": "", "text": "第1条 本文。", "paragraphs": []}],
+                    appendix_tables=["別表第1(第1条関係)\n項目 金額", "別表第2(第1条関係)\n項目2 200円"],
+                    supplements=["附則\n施行する。", "附則(令和2年)\n一部改正。"],
+                )
+            ]
+        ).build(data_version="v1", generated_at_utc="t")
+        rows = [row for cf in built["chunks"].values() for row in cf["chunks"]]
+        by_label = {row["label"]: row for row in rows}
+        self.assertNotIn("unit_index", by_label["第1条"])
+        self.assertEqual(by_label["別表第1(第1条関係)"]["unit_index"], 1)
+        self.assertEqual(by_label["別表第2(第1条関係)"]["unit_index"], 2)
+        self.assertEqual(by_label["附則1"]["unit_index"], 1)
+        self.assertEqual(by_label["附則2"]["unit_index"], 2)
+
+    def test_long_appendix_first_line_overflow_remains_searchable(self):
+        long_heading = (
+            "別表第1 市内における特定地域活性化推進事業の特別交付基準に関する詳細区分表"
+            "（第7条及び第8条関係）"
+        )
+        self.assertGreater(len(long_heading), 40)
+        built = build_search_index(
+            [
+                law(
+                    id="r122RG00000910",
+                    title="詳細区分条例",
+                    appendix_tables=[f"{long_heading}\n区分 金額\n特別枠 100万円"],
+                )
+            ]
+        ).build(data_version="v1", generated_at_utc="t")
+        rows = [row for cf in built["chunks"].values() for row in cf["chunks"]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["label"], long_heading[:40])
+        self.assertIn("詳細区分表", rows[0]["text"])
+        self.assertTrue(any("詳細" in f["terms"] for f in built["postings"].values()))

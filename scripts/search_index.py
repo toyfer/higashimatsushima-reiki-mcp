@@ -162,10 +162,17 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
         kind: str,
         content_status: str = "complete",
         resource: dict[str, Any] | None = None,
+        unit_index: int | None = None,
     ) -> None:
         collapsed = _collapse(body)
         if not collapsed:
             return
+        search_parts = [title]
+        if not (label and collapsed.startswith(label)):
+            search_parts.append(label)
+        if heading:
+            search_parts.append(heading)
+        search_parts.append(collapsed)
         chunk: dict[str, Any] = {
             "law_id": law_id,
             "title": title,
@@ -179,8 +186,10 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
             # build a query-aware window instead of trusting bigram
             # coincidence alone (issues #49, #52).
             "text": collapsed,
-            "search_text": _collapse(" ".join([title, label, heading, collapsed])),
+            "search_text": _collapse(" ".join(search_parts)),
         }
+        if unit_index is not None:
+            chunk["unit_index"] = unit_index
         if resource is not None:
             chunk["resource"] = {
                 "label": str(resource.get("label") or ""),
@@ -213,8 +222,8 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
     for position, table in enumerate(law.get("appendix_tables") or []):
         raw_body = str(table)
         lines = raw_body.splitlines()
-        heading_line = lines[0].strip()[:40] if lines else ""
-        label = heading_line or f"別表{position + 1}"
+        first_line = lines[0].strip() if lines else ""
+        label = first_line[:40] or f"別表{position + 1}"
         resource = _resource_at(law, position, label)
         # Appendix tables that only have a downloadable RTF/PNG are not
         # complete text: flag the chunk itself so the Worker can surface
@@ -222,20 +231,20 @@ def chunk_law(law: dict[str, Any]) -> list[dict[str, Any]]:
         external_only = resource is not None and "\n" not in raw_body.strip()
         content_status = "external_resource_only" if external_only else "complete"
         attached_resource = resource if external_only else None
-        groups: dict[str, list[str]] = {}
-        for line in lines[1:]:
-            collapsed_line = _collapse(line)
-            if not collapsed_line:
-                continue
-            groups.setdefault(label, []).append(collapsed_line)
-        if not groups:
-            add(label, "", raw_body, "appendix_table", content_status, attached_resource)
-            continue
-        for group_label, rows in groups.items():
-            add(group_label, "", " ".join(rows), "appendix_table", content_status, attached_resource)
+        collapsed_lines = [_collapse(line) for line in lines if _collapse(line)]
+        body_text = " ".join(collapsed_lines) if collapsed_lines else raw_body
+        add(
+            label,
+            "",
+            body_text,
+            "appendix_table",
+            content_status,
+            attached_resource,
+            unit_index=position + 1,
+        )
     for position, supplement in enumerate(law.get("supplements") or [], start=1):
         label = f"附則{position}" if len(law.get("supplements") or []) > 1 else "附則"
-        add(label, "", str(supplement), "supplement")
+        add(label, "", str(supplement), "supplement", unit_index=position)
     return chunks
 
 
@@ -319,6 +328,8 @@ class SearchIndexBuilder:
                     "snippet": chunk["snippet"],
                     "text": chunk.get("text", chunk["snippet"]),
                 }
+                if chunk.get("unit_index") is not None:
+                    row["unit_index"] = chunk["unit_index"]
                 resource = chunk.get("resource")
                 if isinstance(resource, dict):
                     row["resource"] = resource

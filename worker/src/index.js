@@ -342,6 +342,8 @@ function unitHaystackText(label, heading, body) {
     const next = bodyText.slice(labelText.length, labelText.length + 1);
     if (bodyText.length === labelText.length || !/[\p{L}\p{N}]/u.test(next)) {
       rest = bodyText.slice(labelText.length).trim();
+    } else {
+      return headingText ? `${headingText} ${bodyText}`.trim() : bodyText;
     }
   }
   return `${labelText} ${headingText} ${rest}`.trim();
