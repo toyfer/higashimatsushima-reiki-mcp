@@ -217,6 +217,27 @@ class PostingBuildTest(unittest.TestCase):
     def test_bigrams_normalize_fullwidth_digits(self):
         self.assertIn("60", text_bigrams("６００万円"))
 
+    def test_chunks_split_across_shards_when_exceeding_shard_size(self):
+        total = search_index.CHUNK_SHARD_SIZE + 5
+        laws = [
+            law(
+                id=f"r122RG{n:08d}",
+                title=f"シャード確認条例{n}",
+                articles=[{"label": "第1条", "heading": "", "text": f"第1条 第{n}号の事務を定める。", "paragraphs": []}],
+            )
+            for n in range(total)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "search"
+            manifest = build_search_index(laws).write(root, data_version="shard-v1", generated_at_utc="t")
+            self.assertEqual(manifest["chunk_count"], total)
+            self.assertEqual(manifest["files"]["chunks"], ["chunks-000.json", "chunks-001.json"])
+            shard0 = json.loads((root / "chunks-000.json").read_text(encoding="utf-8"))["chunks"]
+            shard1 = json.loads((root / "chunks-001.json").read_text(encoding="utf-8"))["chunks"]
+            self.assertEqual(len(shard0), search_index.CHUNK_SHARD_SIZE)
+            self.assertEqual(len(shard1), 5)
+            self.assertEqual([c["i"] for c in shard0] + [c["i"] for c in shard1], list(range(total)))
+
 
 class ContentStatusTest(unittest.TestCase):
     def test_chunks_default_to_complete_without_resources(self):

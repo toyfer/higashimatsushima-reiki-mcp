@@ -62,6 +62,83 @@ export function toolText(body) {
   return JSON.parse(body.result.content[0].text);
 }
 
+function fnv1a32(value) {
+  let result = 2166136261;
+  for (const char of String(value)) {
+    result ^= char.codePointAt(0);
+    result = Math.imul(result, 16777619) >>> 0;
+  }
+  return result >>> 0;
+}
+
+function extractBigrams(value) {
+  const compact = String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const out = [];
+  for (let i = 0; i < compact.length - 1; i += 1) out.push(compact.slice(i, i + 2));
+  return out;
+}
+
+export function buildSearchRoutes(chunks, extraRoutes = {}, options = {}) {
+  const dataVersion = options.dataVersion ?? "fx";
+  const chunkShardSize = options.chunkShardSize ?? 500;
+  const postingShards = Array.from({ length: 16 }, () => ({}));
+  const normalizedChunks = chunks.map((chunk, idx) => ({
+    i: chunk.i ?? idx,
+    source_url: chunk.source_url ?? `https://example.invalid/${chunk.law_id || idx}.html`,
+    heading: chunk.heading ?? "",
+    snippet: chunk.snippet ?? chunk.text ?? "",
+    ...chunk,
+  }));
+
+  let postingEntries = 0;
+  const termsSet = new Set();
+  for (const chunk of normalizedChunks) {
+    const raw = `${chunk.label || ""} ${chunk.heading || ""} ${chunk.text ?? chunk.snippet ?? ""}`;
+    const weight = chunk.weight ?? 1.5;
+    for (const gram of new Set(extractBigrams(raw))) {
+      const shard = fnv1a32(gram) % 16;
+      if (!postingShards[shard][gram]) postingShards[shard][gram] = [];
+      postingShards[shard][gram].push([chunk.i, weight]);
+      termsSet.add(gram);
+      postingEntries += 1;
+    }
+  }
+
+  const routes = {};
+  const chunkFiles = [];
+  for (let offset = 0, shardIdx = 0; offset < normalizedChunks.length || shardIdx === 0; offset += chunkShardSize, shardIdx += 1) {
+    const filename = `chunks-${String(shardIdx).padStart(3, "0")}.json`;
+    chunkFiles.push(filename);
+    const slice = normalizedChunks.slice(offset, offset + chunkShardSize).map(({ weight: _w, ...rest }) => rest);
+    routes[`/api/search/${filename}`] = { data_version: dataVersion, chunks: slice };
+    if (offset + chunkShardSize >= normalizedChunks.length) break;
+  }
+
+  const postingFiles = postingShards.map((terms, shardIdx) => {
+    const filename = `postings-${String(shardIdx).padStart(2, "0")}.json`;
+    routes[`/api/search/${filename}`] = { data_version: dataVersion, terms };
+    return filename;
+  });
+
+  routes["/api/search/manifest.json"] = {
+    version: 1,
+    kind: "bigram-tfidf",
+    data_version: dataVersion,
+    generated_at_utc: "2026-11-15T00:00:00Z",
+    law_count: new Set(normalizedChunks.map((c) => c.law_id)).size,
+    chunk_count: normalizedChunks.length,
+    chunk_shard_size: chunkShardSize,
+    posting_shards: 16,
+    max_postings_per_term: options.maxPostingsPerTerm ?? 50,
+    max_postings_per_law_per_term: options.maxPostingsPerLawPerTerm ?? 3,
+    posting_terms: termsSet.size,
+    posting_entries: postingEntries,
+    files: { chunks: chunkFiles, postings: postingFiles },
+  };
+
+  return { ...routes, ...extraRoutes };
+}
+
 export const TITLE_INDEX = {
   data_version: "fx",
   laws: [

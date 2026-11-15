@@ -256,3 +256,53 @@ test("health returns 200 when healthy and 503 on failure states", async () => {
     }
   }
 });
+
+test("tools/list exposes complete input schemas for all 7 tools", async () => {
+  const restore = mockFetch(pagesJson({}));
+  try {
+    const res = await worker.fetch(request("/mcp", { jsonrpc: "2.0", id: "tl-1", method: "tools/list" }), {});
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const tools = body.result?.tools || [];
+    assert.equal(tools.length, 7);
+    for (const tool of tools) {
+      assert.equal(typeof tool.name, "string");
+      assert.ok(tool.description && tool.description.length > 10, `${tool.name} needs a description`);
+      assert.equal(tool.inputSchema?.type, "object", tool.name);
+      assert.equal(tool.inputSchema?.additionalProperties, false, tool.name);
+      const props = Object.keys(tool.inputSchema?.properties || {});
+      for (const req of tool.inputSchema?.required || []) {
+        assert.ok(props.includes(req), `${tool.name} required key ${req} missing from properties`);
+      }
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("HTTP routing handles OPTIONS preflight, discovery JSON, 405, and 404", async () => {
+  const restore = mockFetch(pagesJson({}));
+  try {
+    const preflight = await worker.fetch(new Request("http://localhost/mcp", { method: "OPTIONS" }), {});
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), "*");
+
+    const root = await worker.fetch(new Request("http://localhost/"), {});
+    assert.equal(root.status, 200);
+    const rootJson = await root.json();
+    assert.equal(rootJson.endpoints?.mcp, "/mcp");
+    assert.equal(rootJson.tools.length, 7);
+
+    const mcpGet = await worker.fetch(new Request("http://localhost/mcp"), {});
+    assert.equal(mcpGet.status, 200);
+    assert.equal((await mcpGet.json()).tools.length, 7);
+
+    const methodNotAllowed = await worker.fetch(new Request("http://localhost/mcp", { method: "PUT" }), {});
+    assert.equal(methodNotAllowed.status, 405);
+
+    const notFound = await worker.fetch(new Request("http://localhost/nonexistent"), {});
+    assert.equal(notFound.status, 404);
+  } finally {
+    restore();
+  }
+});
