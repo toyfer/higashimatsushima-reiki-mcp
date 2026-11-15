@@ -3,23 +3,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import http.client
 import json
 import os
 import re
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from daily_check import collect_from_taikei, extract_current_date, fetch_text
+from daily_check import FETCH_ERRORS, extract_current_date, fetch_text
 from parse_honbun import HISTORY_DATE_RE, HISTORY_NUMBER_RE, parse_honbun
 from search_index import build_search_index
-from reiki_common import MENU_URL, USER_AGENT
+from reiki_common import MENU_URL
 
 SAFE_ID_RE = re.compile(r"^r\d+RG\d+$", re.I)
 
@@ -164,7 +161,7 @@ def main() -> int:
     try:
         menu_html, menu_hash = fetch_text(MENU_URL)
         current_date = extract_current_date(menu_html)
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+    except FETCH_ERRORS as exc:
         print(f"WARNING: menu fetch failed: {exc!r}", file=sys.stderr)
         menu_hash = str(status.get("menu_sha256", ""))
         current_date = str(status.get("current_date", ""))
@@ -204,7 +201,7 @@ def main() -> int:
             continue
         try:
             html, _digest = fetch_text(url)
-        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        except FETCH_ERRORS as exc:
             failures.append({"id": law_id, "url": url, "error": repr(exc)})
             if args.fail_on_error:
                 return 3

@@ -1,153 +1,165 @@
-## Higashimatsushima ordinance static API and MCP foundation
+# 東松島市例規 静的 API & Remote MCP サーバー
 
-This repository builds a read-only static API for the Higashimatsushima City ordinance pages and prepares it for a remote MCP server on Cloudflare Workers.
+東松島市が公開している例規集の公式 HTML を日次で監視・構造化し、**GitHub Pages 上の読み取り専用静的 JSON API** と、それをラップした **Cloudflare Workers 上のステートレス Remote MCP サーバー** として提供するプロジェクトです。
 
-Source: Higashimatsushima City ordinance menu at `https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html`.
+- **一次情報**: [東松島市例規集（公式 HTML）](https://www.city.higashimatsushima.miyagi.jp/reiki/reiki_menu.html) — 正本は常に市公式サイトです。本 API・MCP の出力は公開ページからの機械抽出データであり、重要な判断・対外案内では応答に含まれる `source_url` から原文も確認してください。
+- **公開静的 API 入口**: `https://toyfer.github.io/higashimatsushima-reiki-mcp/`
+- **Remote MCP エンドポイント**: `https://higashimatsushima-reiki-mcp.toys-master.dev/mcp`
 
-The daily checker never loads every ordinance body by default. It first checks the menu page hash and the site current date. Only when the site changes does it rebuild the ordinance URL index. Full body JSON is built separately into `site/api/` and published by GitHub Pages.
+## プロジェクトの現在地と方向性
 
-## Architecture
+初期構想では Cloudflare D1 への格納も視野に入れていましたが、維持コストとデータ同期の不整合をなくすため、現在は **「GitHub Pages 静的 JSON ＋ ビッググラム TF-IDF シャード ＋ ステートレス Cloudflare Worker」** を正式な本番アーキテクチャとして採用し、すでに全自動パイプラインで運用しています。
 
-| Layer | Role |
+- **目指すゴール**: LLM / MCP クライアントが東松島市の現行例規（1,192 件）を、最小限のトークン消費かつハルシネーションなしで検索し、一次情報 URL・内容現在日・データ版数付きの根拠としてそのまま引用できる実用 MCP を安定運用すること。
+- **スコープ境界（やらないこと）**:
+  - **過去時点スナップショット（`asof`）**: 公式 HTML が現在版のみを掲載しているため非対応とし、明確なエラーで拒否します。
+  - **外部ファイル（RTF / PNG）の本文自動抽出**: ダウンロード形式の別表・様式は OCR や RTF 変換を行わず、`content_status: "external_resource_only"` と一次資料リンク（`resource`）を返して本文欠落の誤認を防ぎます。
+- **今後のロードマップ・設計記録**: アーキテクチャ判断、LLM 視点の UX 改善基準、および現在対応中の課題（`#110`〜`#112`, `#115`）の全体像は [`docs/roadmap-and-llm-ux.md`](docs/roadmap-and-llm-ux.md) にまとめています。
+
+## 使う側（LLM / MCP クライアント）向けガイド
+
+### エンドポイント
+
+| パス | 用途 |
 |---|---|
-| Higashimatsushima City site | Official ordinance HTML. Always treat it as the primary source. |
-| GitHub Actions `daily-reiki-check.yml` | Daily menu check, index crawl on change, status commit and issue notifications. |
-| GitHub Actions `pages.yml` | Builds static JSON under `site/api/` and deploys `site/` to GitHub Pages. Runs on push, on a weekly schedule and through `workflow_call` from the daily check. |
-| GitHub Pages | Static read-only API: `/api/meta.json`, `/api/laws/index.json`, `/api/laws/{law_id}.json`. |
-| Cloudflare Worker | Wraps the static API and exposes `/mcp` plus `/health`. |
-| MCP client | Calls the Worker endpoint. It does not read GitHub Pages directly. |
+| `GET /` | サービス概要、公開ツール一覧、接続先 Pages ベース URL |
+| `GET /live` | Worker 単体の生存確認（Pages 取得なし、常に HTTP 200） |
+| `GET /health` | 公開静的 API（`api/health.json`）を含めた稼働確認（異常時は HTTP 503） |
+| `GET /mcp` | MCP エンドポイントの説明情報 |
+| `POST /mcp` | MCP（Streamable HTTP / stateless JSON-RPC 2.0）エンドポイント |
 
-## Static API
+`AUTH_TOKEN` が設定された環境では、`POST /mcp` に対して `Authorization: Bearer <token>` ヘッダが必要です（`GET /`, `/live`, `/health`, `/mcp` は認証なしで参照可能です）。
 
-After a full build and Pages deploy, the public endpoints are:
+### MCP ツール一覧（7 ツール）
 
-| Path | Contents |
+| ツール名 | 主な用途 | 主な入力 | 参照する静的ファイル |
+|---|---|---|---|
+| `reiki_status` | 公開データの鮮度・版・検索索引状態の取得 | なし | `api/meta.json`, `api/health.json`, `api/search/manifest.json` |
+| `search_laws_by_title` | 例規名・例規番号・分類・ID による検索（要旨のみ） | `query`, `limit` | `api/search/title-index.json` |
+| `search_laws_by_content` | 2段階本文検索（bigram 候補抽出＋厳密語句照合） | `query`, `limit`, `law_id`, `operator`, `scope`, `group_by`, `exact`, `snippet_chars` | `api/search/manifest.json`, `postings-*.json`, `chunks-*.json`（`law_id` 指定時は個別 JSON のみ 1 fetch） |
+| `get_toc` | 条文見出し一覧、章節構造、前文・別表・附則の規模確認 | `law_id`, `offset`, `limit` | `api/laws/{law_id}.json` |
+| `get_article` | 条・項・号を指定した確定本文の取得 | `law_id`, `article_label`, `paragraph`, `item` | `api/laws/{law_id}.json` |
+| `get_unit` | 別表（`appendix_table` / `beppyo`）または附則（`supplement` / `suppl`）の個別取得 | `law_id`, `kind`, `n` | `api/laws/{law_id}.json` |
+| `get_law` | 1 例規の全文 JSON 取得（小規模例規・要綱向け） | `law_id` | `api/laws/{law_id}.json` |
+
+ツール引数の詳細仕様は [`worker/README.md`](worker/README.md) を参照してください。
+
+### LLM から正確・低トークンで使うための推奨フロー
+
+1. **入口は `search_laws_by_title` または `search_laws_by_content` を使う**
+   - 名称や番号が分かっている場合は軽量な `search_laws_by_title`（NFKC 正規化・空白区切り AND 対応）を使います。
+   - 制度内容・金額・条件から探す場合は `search_laws_by_content` を使います。検索結果の `snippet` は前後抜粋（既定 280 文字）のため、**回答や引用の根拠として確定する前に必ず `get_article` / `get_unit` / 小規模例規の `get_law` で一次本文を確認してください**。
+2. **原則 `get_toc` を挟んでから必要な条・単位だけを取得する**
+   - 大規模条例にいきなり `get_law` を呼ぶと応答が極端に大きくなります（例：`r122RG00000066` 東松島市市税条例は約 834 KB / 36.4 万文字）。
+   - まず `get_toc` で `article_count` や `has_body_text`・`appendix_table_count`・`supplement_count` を確認し、条文がある場合は `get_article`（必要に応じて `paragraph` / `item` 指定）や `get_unit` を使います。
+   - 要綱・ガイドラインなど `article_count === 0` かつ `has_body_text === true` の例規や、数条のみの短い例規を読む場合に限り `get_law` が適しています。
+3. **本文検索の仕様と制約を踏まえて判定する**
+   - **2 文字以上必須**: インデックスが 2-gram のみのため、1 文字（例: `税`）は検索対象外です。
+   - **厳密一致と数値境界**: 既定の `exact: true` では `600点`＋`500万円` による `600万円` 誤一致や、`3,600万円` の中での `600万円` 誤一致を除外します。表記ゆれも含めて広げたい場合のみ `exact: false` を使います。
+   - **網羅性と欠落の確認**: 応答の `completeness`（`complete` / `partial`）、`truncation_reasons`、`index_caps`（1 語最大 50 posting・1 例規最大 3 posting・1 回最大 46 fetch / 300 候補）および別表の `content_status`（`external_resource_only`）を確認し、上限到達や外部ファイル未収録を「該当なし」と誤認しないようにします。
+
+## アーキテクチャと静的 API
+
+### システム構成
+
+| レイヤー | 役割 |
 |---|---|
-| `api/meta.json` | Generation time, site current date, menu hash, data version and law count |
-| `api/health.json` | Minimal build health: `ok`, `law_count`, `failure_count`, `data_version` |
-| `api/laws/index.json` | Ordinance list with title, ordinance number, classification and article count |
-| `api/search/title-index.json` | Small title search index for the Worker |
-| `api/search/manifest.json` | Keyword body-search index manifest: `bigram-tfidf`, counts and shard files |
-| `api/search/chunks-*.json` | Body-search chunks with title, article label, snippet and `source_url` |
-| `api/search/postings-*.json` | Bigram TF-IDF postings sharded by term hash |
-| `api/laws/{law_id}.json` | One ordinance: articles, paragraphs, items, supplements, appendix tables, `appendix_styles`, `resources`, `appendix_table_resource_index`, history, plus `content_current_date` and `data_version` |
+| 東松島市公式サイト | 例規集の公式 HTML。常に一次情報源として扱う |
+| GitHub Actions `daily-reiki-check.yml` | 毎日 03:17 JST にメニューページのハッシュと内容現在日を確認。変更時のみ目次を再クロールし、ステータス更新・通知 Issue 作成・Pages フルビルド起動を行う |
+| GitHub Actions `pages.yml` | `site/api/` 以下に静的 JSON と検索インデックスを生成し、整合性検証のうえ GitHub Pages へデプロイする（コード変更 push・週次定期・日次変更検知から実行） |
+| GitHub Pages | 読み取り専用静的 API（`api/meta.json`, `api/laws/*.json`, `api/search/*`）の配信基盤 |
+| Cloudflare Worker（`worker/`） | 静的 API をエッジキャッシュ付きでラップし、MCP エンドポイント（`/mcp`）と `/health` を提供する |
+| MCP クライアント（LLM） | Worker の `/mcp` を呼び出す（GitHub Pages を直接取得しない） |
 
-Example law IDs look like `r122RG00000002`.
+### 公開静的 API エンドポイント（`site/api/`）
 
-### Appendix tables and their resources
-
-`resources` is one array that mixes appendix tables and 様式 (style) documents, and the two do not share an order. `appendix_table_resource_index` maps a table's position in `appendix_tables` to its entry in `resources`: `appendix_table_resource_index[0] === 2` means the first appendix table's RTF or thumbnail is `resources[2]`. A table with no external document has `null` there, and the Worker returns `resource: null` instead of borrowing a neighbouring style document (issue #61).
-
-Each `resources[]` entry carries `kind` (`appendix` or `form`), `table_number`, `table_branch` and `seq`. `table_branch` is the 枝番 of `別表第2の3`, `0` for a numbered table that has no branch, and `null` for a 様式 or an unnumbered `別表(第2条関係)`. The Worker relies only on `appendix_table_resource_index`, so an older JSON without the mapping still resolves through the positional lookup.
-
-`appendix_styles` holds the 様式 sections as text, so a style document no longer enters `appendix_tables` as a heading-only table. A heading-only table whose body lives in RTF or PNG is published with `content_status: external_resource_only` and its `resource`, which is how a missing body stays visible instead of being presented as complete text.
-
-### Body search index
-
-`api/search/manifest.json` describes a bigram TF-IDF index built at Pages build time, so the Worker never scores a corpus at request time:
-
-| Field | Meaning |
+| パス | 内容 |
 |---|---|
-| `data_version` | Version of the build that produced every posting and chunk shard |
-| `chunk_count` / `chunk_shard_size` | Chunks (`chunks-NNN.json`, 500 per shard) |
-| `posting_shards` | Number of posting files, sharded by a hash of the term |
-| `max_postings_per_term` | 50 |
-| `max_postings_per_law_per_term` | 3 |
-| `external_resource_chunks` | Chunks whose body is a heading-only appendix table whose text lives in an RTF or PNG resource |
-| `external_resource_chars` | Characters of `search_text` in those chunks |
+| `api/meta.json` | 生成日時、内容現在日、メニューハッシュ、`data_version`、例規件数、警告・失敗情報 |
+| `api/health.json` | ビルド健全性（`ok`, `law_count`, `expected_count`, `failure_count`, `validation_problems`, `data_version`, `commit_sha`） |
+| `api/laws/index.json` | 全例規メタデータ一覧（ID・名称・発令日・例規番号・体系分類・条数・先頭条文・警告） |
+| `api/laws/{law_id}.json` | 1 例規の構造化 JSON（条・項・号・附則・別表・様式テキスト・外部リソース対応表・沿革・`content_current_date`・`data_version`） |
+| `api/search/title-index.json` | タイトル検索用の軽量インデックス |
+| `api/search/manifest.json` | 本文検索インデックスのマニフェスト（`bigram-tfidf`、件数、シャードファイル一覧） |
+| `api/search/chunks-{000..NNN}.json` | 本文検索チャンク（500 チャンク/シャード。見出し、ラベル、スニペット、検証用全文 `text`、`content_status`） |
+| `api/search/postings-{00..NN}.json` | 用語ハッシュで分割した bigram TF-IDF ポスティング（16 シャード） |
 
-Search runs in two stages: postings generate candidates, then each candidate chunk is verified against its full text, which the chunk shard carries as `text`. The verification step is what stops `600点` + `500万円` from satisfying `600万円`, since the four bigrams match without the phrase. `exact: false` keeps those bigram-only hits and labels them `approximate`.
+### 別表と外部リソースの扱い
 
-`operator` (`AND`/`OR`) and `scope` (`chunk`/`law`) are explicit: `scope=chunk` requires every term in one chunk, `scope=law` accepts every term somewhere in one ordinance and returns `matches[]` with the evidence chunk per term. Results include `match_type`, `matched_terms`, `unmatched_terms`, and a `snippet` with `highlights`.
+`resources[]` には別表と様式（`form`）のダウンロードリンク（RTF / PNG）が混在するため、単純な配列位置ではなく `appendix_table_resource_index` によって別表と外部リソースを厳密に対応付けています（`appendix_table_resource_index[0] === 2` なら 1 番目の別表に対応する資料は `resources[2]`、該当なしは `null`）。また、様式本文は `appendix_styles` へ分離され、見出しのみで実体が RTF/PNG にある別表には `content_status: "external_resource_only"` が付与されます。
 
-Every chunk carries `content_status` (`complete` or `external_resource_only`), and results echo it together with `resource` when an appendix table has an external document. A heading-only table is therefore never returned as if its body had been parsed.
+### 本文検索インデックスの実測値
 
-Within one call the Worker spends at most 46 Pages fetches and 300 examined candidates, and the index truncates each term to 50 postings (3 per law per term). Responses report `completeness` (`complete`/`partial`), `filtered_out_exact`, `filtered_out_no_term`, `skipped_per_law`, `truncation_reasons` and `index_caps`, so "no such term" is distinguishable from "a cap was reached".
+`api/search/manifest.json` に記録される bigram TF-IDF インデックスは、Pages ビルド時に生成されます（Worker はリクエスト時にコーパス全体を走査しません）。
 
-Measured index size with full chunk text: 57 shards, 32.4 MiB, largest shard 823 KiB (chunk), 632 KiB (posting) for 20,442 chunks.
-
-Queries need at least two searchable characters after NFKC normalisation, because the index stores bigrams only. Passing a `law_id` to the Worker restricts the search to that ordinance by reading only its JSON, so results never include other ordinances.
-
-## Workflows
-
-### Daily check
-
-Runs at 03:17 JST. The workflow file uses UTC cron `17 18 * * *`.
-
-| Input | Meaning |
+| 項目 | 現行値・実測（`data_version: 0623d75154345ebe` 時点） |
 |---|---|
-| `mode=check` | Fetch the menu page. Crawl index pages only when the menu changed. |
-| `mode=collect` | Always crawl index pages and rebuild the ordinance URL list. |
-| `force_collect=true` | Same crawl trigger for `check` mode. |
+| 対象例規数 / チャンク数 | `1,192` 例規 / `19,684` チャンク |
+| チャンクシャード / ポスティングシャード | `40` チャンクシャード（`chunk_shard_size: 500`） + `16` ポスティングシャード = 計 `56` シャード（`manifest.json` 含め `57` ファイル） |
+| 総サイズ / 最大シャード | `31.5 MiB` / チャンク最大 `916 KiB`（`chunks-002.json`）・ポスティング最大 `614 KiB`（`postings-15.json`） |
+| インデックス上限 | 1 ターム最大 `50` postings（1 例規・1 ターム最大 `3` postings） |
+| Worker 呼び出し上限 | 1 リクエスト最大 `46` Pages fetches / `300` 候補検証 / `10` posting shards |
 
-### Pages deploy
+## ワークフローとローカル開発
 
-`pages.yml` runs on pushes that touch `site/**`, the builder scripts, the status file, or the workflow itself. It also runs weekly (`17 19 * * 6`) and is called by `daily-reiki-check.yml` when the city site changed. Those two paths always build the full API, so a merged parser fix reaches Pages without a manual dispatch.
+### GitHub Actions 構成
 
-Manual runs expose:
+- **`daily-reiki-check.yml`**: 毎日 `18:17 UTC`（`03:17 JST`）に実行。`mode=check` ではメニューページのみを確認し、ハッシュまたは内容現在日が変化したときだけ体系目次をクロールして `data/status/latest.json` を更新し、`pages.yml`（`full_build=true`）を呼び出します。
+- **`pages.yml`**: `site/**`・ビルダー系スクリプト・ステータスファイル・自身の変更を含む `main` push、週次スケジュール（土曜 `19:17 UTC` = 日曜 `04:17 JST`）、日次チェックからの `workflow_call`、または手動実行で静的 API を構築・検証して GitHub Pages へ公開します。公開済み API が 5 件超の状態で誤って 5 件サンプルビルドで上書きしないよう、Sample downgrade guard（`allow_sample_overwrite=false` 既定）を実装しています。市サイトへ負荷をかけないよう、開発中に全量ビルドを連続実行しないでください。
+- **`search-eval.yml`**: `pages.yml` の成功後に自動実行され、`tools/search_eval.mjs` で公開インデックスに対するゴールデンセット回帰テストを実行します。
+- **`deploy-worker.yml`**: `worker/**` への `main` push または手動実行で Worker テストを実行し、公開済み検索インデックスの存在を確認したうえで Cloudflare Workers へデプロイ・疎通確認を行います。
+- **`test.yml`**: PR および `main` push 時に Python 単体テスト・Worker 構文チェック・Worker テストを実行します（デプロイ処理は一切含みません）。
 
-| Input | Meaning |
-|---|---|
-| `full_build=false` | Build a 5-ordinance sample API and deploy it. Use this first. |
-| `full_build=true` | Fetch every ordinance body in `data/status/latest.json` and deploy the full API. |
-| `allow_sample_overwrite` | Permit a 5-ordinance sample run to replace a larger published API. Ignored when `full_build=true`. Leave it `false`; the guard skips the sample deploy instead of downgrading the site. |
-| `delay_seconds` | Delay between city-site fetches during a full build. Keep the default unless there is a reason to change it. |
+詳細は [`docs/github-actions.md`](docs/github-actions.md) および [`docs/search-eval.md`](docs/search-eval.md) を参照してください。
 
-Do not run full builds repeatedly against the city site during development.
-
-A full build regenerates every ordinance body and the whole search index, so it also changes `data_version`. Run it after parser or index changes, then let the Worker pick the new version up.
-
-## Local commands
+### ローカル実行コマンド
 
 ```bash
+# Python テスト（ネットワーク不要）
 python3 -m unittest discover -s tests -v
+
+# Worker テスト（ネットワーク不要）
+cd worker && npm ci && npm run check && npm test
+
+# メニュー変更確認 / 5件サンプル静的 API ビルド / 単体 ID ビルド
 python3 scripts/daily_check.py --mode check
 python3 scripts/build_static_api.py --limit 5 --delay 0.1
 python3 scripts/build_static_api.py --only-id r122RG00000002 --delay 0.1
+
+# 検索インデックス計測 / 公式 HTML との構造突合 / 公開インデックス検索評価
 python3 scripts/measure_search_index.py
 python3 tools/verify_structure.py --sample 10
+node tools/search_eval.mjs
 ```
 
-## Files
+### デプロイ順序と確認手順
 
-| Path | Purpose |
-|---|---|
-| `.github/workflows/daily-reiki-check.yml` | Daily schedule, manual dispatch, status commit, change issue and failure issue |
-| `.github/workflows/pages.yml` | Static API build and GitHub Pages deployment |
-| `scripts/daily_check.py` | Menu check and systematic index collector |
-| `scripts/parse_honbun.py` | Ordinance body HTML parser |
-| `scripts/build_static_api.py` | Static API builder writing under `site/api/` |
-| `scripts/search_index.py` | Bigram TF-IDF body-search index builder |
-| `scripts/measure_search_index.py` | Local / CI measurement of search index build cost and size |
-| `tools/verify_structure.py` | Re-parses sampled ordinances and diffs article, chapter and supplement counts against the published API |
-| `data/status/latest.json` | Last known menu hash, site current date and ordinance URL list |
-| `site/index.html` | Human-readable entry page for the static API |
-| `worker/src/index.js` | Stateless MCP Worker over the published static API |
-| `worker/test/` | Worker unit and Python-to-Worker contract tests |
-| `.github/workflows/deploy-worker.yml` | Worker deploy, published-index precondition, endpoint verification |
-| `tests/` | Network-free parser and checker tests |
-| `tests/fixtures/search_golden.json` | Golden-set cases for the body search evaluation |
-| `tools/search_eval.mjs` | Golden-set run of the Worker against the published index |
-| `.github/workflows/search-eval.yml` | Golden-set run after each successful Pages publish |
-
-## Deploy order and verification
-
-The Worker is already implemented under `worker/` and exposes seven MCP tools: `reiki_status`, `search_laws_by_title`, `search_laws_by_content`, `get_law`, `get_article`, `get_toc` and `get_unit`. Tool behaviour, limits and arguments are documented in `worker/README.md`.
-
-Publish Pages before the Worker. A Worker that points at a Pages site without a search index answers `search_laws_by_content` with a Pages 404, which is why `deploy-worker.yml` checks the published index before `wrangler deploy` and then calls the search tool from the deployed endpoint.
+Worker は GitHub Pages 上の静的 API と検索インデックスを参照するため、**必ず GitHub Pages の公開を先に完了させてから Worker をデプロイ**します（`deploy-worker.yml` でもデプロイ前に公開インデックスの存在を検証しています）。
 
 ```bash
-# 1. publish or refresh the index (full build)
-#    Pages workflow -> workflow_dispatch
+# 1. 静的 API と検索インデックスを全量公開（Pages ワークフロー手動実行時）
 #    full_build=true, allow_sample_overwrite=false, delay_seconds=0.35
-# 2. confirm the published index
+
+# 2. 公開インデックスと健全性の確認
 curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/search/manifest.json"
 curl -fsS "https://toyfer.github.io/higashimatsushima-reiki-mcp/api/health.json"
-# 3. deploy the Worker (push to worker/** or run the Deploy Worker workflow)
-# 4. confirm the deployed endpoint
-curl -fsS https://higashimatsushima-reiki-mcp.toys-master.dev/health
+
+# 3. Worker デプロイ（worker/** 更新または Deploy Worker workflow 実行）後、稼働確認
+curl -fsS "https://higashimatsushima-reiki-mcp.toys-master.dev/health"
 ```
 
-The Pages workflow also verifies the built `site/api/search` before upload: a missing manifest, a missing shard, or a shard whose `data_version` differs from `health.json` fails the job instead of deploying a half-updated index.
+## リポジトリ構成
 
-Only the currently published version is served. Historical snapshots are a separate design problem: responses carry `content_current_date` and `data_version`, and the Worker rejects `asof` rather than returning today's text as if it were historical.
+| パス | 役割 |
+|---|---|
+| `README.md` | プロジェクト全体の案内、方向性、LLM 利用ガイド、構成一覧 |
+| `docs/roadmap-and-llm-ux.md` | 設計方針（非 D1 構成・非目標）、LLM UX 改善基準、Open Issue マップ |
+| `docs/github-actions.md` | 日次チェックと Pages ビルド・ガード設計の詳細 |
+| `docs/search-eval.md` | 検索ゴールデンセットの目的とケース仕様 |
+| `worker/README.md` | MCP Worker エンドポイントと 7 ツールの詳細仕様 |
+| `scripts/` | 変更検知（`daily_check.py`）、HTML 解析（`parse_honbun.py`）、静的 API 構築（`build_static_api.py`）、索引生成（`search_index.py`） |
+| `worker/` | ステートレス MCP Worker（`src/index.js`）と単体・契約テスト（`test/`） |
+| `tools/` | 構造突合（`verify_structure.py`）、検索ゴールデンセット評価（`search_eval.mjs`）、検索探索プローブ（`search_probe.mjs`） |
+| `tests/` | パーサー・ビルダー・索引・ワークフロー不変条件のユニットテスト |
+| `data/status/latest.json` | 最新のメニューハッシュ、内容現在日、例規 URL 一覧 |
+| `site/index.html` | 静的 API の人間向け案内ページ |
